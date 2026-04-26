@@ -1,0 +1,430 @@
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const qrcode = require('qrcode-terminal');
+const fs = require('fs');
+const Tesseract = require('tesseract.js');
+
+process.on('unhandledRejection', e => console.error('⚠️ Rejection:', e.message));
+process.on('uncaughtException',  e => console.error('⚠️ Exception:', e.message));
+
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'], headless: true, timeout: 60000 }
+});
+
+// ─────────────────────────────────────────────────────
+//  HELPERS
+// ─────────────────────────────────────────────────────
+const safeRead  = (file, fallback) => {
+    try { if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
+    return fallback;
+};
+const safeWrite = (file, data) => {
+    try { fs.writeFileSync(file, JSON.stringify(data, null, 2)); }
+    catch(e) { console.error(`❌ Write error [${file}]:`, e.message); }
+};
+
+// ─────────────────────────────────────────────────────
+//  LOGGER
+// ─────────────────────────────────────────────────────
+const LOG_FILE = './bot.log';
+const log = (level, msg) => {
+    const entry = `[${new Date().toLocaleString('en-IN')}] [${level}] ${msg}`;
+    console.log(entry);
+    try { fs.appendFileSync(LOG_FILE, entry + '\n'); } catch {}
+};
+
+// ─────────────────────────────────────────────────────
+//  STATE
+// ─────────────────────────────────────────────────────
+const pendingPayments = {};
+const rateLimitMap    = {};
+const sessionTimeout  = {};
+const antiSpam        = new Set();
+let maxSlots          = 24;
+
+let activeMode = safeRead('./mode.json', { mode: 'both' }).mode;
+const saveMode = () => safeWrite('./mode.json', { mode: activeMode });
+
+let links = safeRead('./links.json', {
+    mini: 'https://chat.whatsapp.com/xxx',
+    mega: 'https://chat.whatsapp.com/yyy'
+});
+const saveLinks = () => safeWrite('./links.json', links);
+
+let settings = safeRead('./settings.json', { miniPrice: '25', megaPrice: '30' });
+const saveSettings = () => safeWrite('./settings.json', settings);
+
+const MAG_UPI_IDS     = ['8823827920@okbizaxis', '8823827920', 'mag esports', 'magesports', 'mag_esports'];
+const VALID_AMOUNTS   = ['25', '30', '32', '35', '50', '60'];
+const OCR_MIN_CONF    = 35;
+const AUTO_VERIFY_MIN = 7;
+
+// ─────────────────────────────────────────────────────
+//  RATE LIMITER & SESSION
+// ─────────────────────────────────────────────────────
+const RATE_LIMIT  = 5;
+const RATE_WINDOW = 60 * 1000;
+
+const isRateLimited = (userId) => {
+    const now = Date.now();
+    if (!rateLimitMap[userId]) rateLimitMap[userId] = [];
+    rateLimitMap[userId] = rateLimitMap[userId].filter(t => now - t < RATE_WINDOW);
+    if (rateLimitMap[userId].length >= RATE_LIMIT) return true;
+    rateLimitMap[userId].push(now);
+    return false;
+};
+
+const SESSION_TTL = 5 * 60 * 1000;
+const touchSession = (userId) => {
+    if (sessionTimeout[userId]) clearTimeout(sessionTimeout[userId]);
+    sessionTimeout[userId] = setTimeout(async () => {
+        if (pendingPayments[userId]) {
+            delete pendingPayments[userId];
+            log('INFO', `Session expired: ${userId}`);
+            try { await client.sendMessage(userId, '⌛ *Session timeout ho gayi.*\nDobara screenshot bhejo to restart karo.'); } catch {}
+        }
+    }, SESSION_TTL);
+};
+
+const clearSession = (userId) => {
+    if (sessionTimeout[userId]) clearTimeout(sessionTimeout[userId]);
+    delete sessionTimeout[userId];
+    delete pendingPayments[userId];
+};
+
+// ─────────────────────────────────────────────────────
+//  SLOT HELPERS & FOMO
+// ─────────────────────────────────────────────────────
+const readRecords      = () => safeRead('./records.json', []);
+const getSlotCount     = (type) => readRecords().filter(r => r.lobbyType?.toLowerCase() === type?.toLowerCase()).length;
+const isSlotsAvailable = (type) => getSlotCount(type) < maxSlots;
+
+const saveRecord = (teamName, number, lobbyType, utr = 'N/A', amount = 'N/A') => {
+    const records = readRecords();
+    records.push({ teamName, number: `+${number}`, lobbyType, utr, amount, timestamp: new Date().toLocaleString('en-IN') });
+    safeWrite('./records.json', records);
+    log('INFO', `✅ Registered: ${teamName} | ${lobbyType} | +${number}`);
+};
+
+const removeRecord = (number) => {
+    const records  = readRecords();
+    const filtered = records.filter(r => r.number !== `+${number}` && r.number !== number);
+    safeWrite('./records.json', filtered);
+};
+
+const isDuplicateUTR = (utr) => {
+    if (!utr || utr === 'N/A') return false;
+    return readRecords().some(r => r.utr === utr);
+};
+
+const getStats = () => {
+    const records = readRecords();
+    const mini    = records.filter(r => r.lobbyType?.toLowerCase() === 'mini').length;
+    const mega    = records.filter(r => r.lobbyType?.toLowerCase() === 'mega').length;
+    return { total: records.length, mini, mega };
+};
+
+const getFomoText = (slotsLeft) => {
+    if (slotsLeft === 0) return `🛑 *FULL HOGAYA*`;
+    if (slotsLeft <= 3)  return `🔥 *SIRF ${slotsLeft} SLOT BAKI HAI!*`;
+    return `⚡ *Bohot kam slots baki hain!*`;
+};
+
+// ─────────────────────────────────────────────────────
+//  OCR ENGINE
+// ─────────────────────────────────────────────────────
+let _ocrWorker = null;
+const getOCRWorker = async () => {
+    if (!_ocrWorker) {
+        _ocrWorker = await Tesseract.createWorker('eng', 1, { logger: () => {} });
+        await _ocrWorker.setParameters({ tessedit_pageseg_mode: '11', preserve_interword_spaces: '1' });
+    }
+    return _ocrWorker;
+};
+const resetOCRWorker = async () => { try { if (_ocrWorker) await _ocrWorker.terminate(); } catch {} _ocrWorker = null; };
+
+const extractUTR = (text) => {
+    const patterns = [ /\b(T\d{11})\b/i, /UTR[:\s#]*([A-Z0-9]{10,22})/i, /Ref(?:erence)?\.?\s*(?:No\.?|ID|Number)?[:\s]*([A-Z0-9]{8,22})/i, /Transaction\s*(?:ID|No\.?|Ref\.?)[:\s]*([A-Z0-9]{8,22})/i, /UPI\s*(?:Ref(?:\.?\s*No)?|Txn\.?|ID)[:\s]*([A-Z0-9]{8,22})/i, /\b([A-Z]{2,4}\d{9,14})\b/, /\b(\d{12})\b/, /\b(\d{16})\b/ ];
+    for (const pat of patterns) { const m = text.match(pat); if (m && m[1] && m[1].length >= 8) return m[1].toUpperCase(); }
+    return null;
+};
+
+const extractAmount = (rawText) => {
+    const text = rawText.replace(/,/g, '');
+    const labeled = [ /(?:Amount\s*(?:Paid)?|Paid|Total(?:\s*Amount)?|Payment)[:\s]*(?:₹|Rs\.?|INR)?\s*(\d+(?:\.\d{1,2})?)/i, /(?:₹|Rs\.?|INR)\s*(\d+(?:\.\d{1,2})?)/i ];
+    for (const pat of labeled) { const m = text.match(pat); if (m) return String(parseInt(m[1], 10)); }
+    for (const m of text.matchAll(/\b(\d{2,4})\.0{1,2}\b/g)) if (VALID_AMOUNTS.includes(m[1])) return m[1];
+    for (const m of text.matchAll(/\b(\d{2,4})\b/g))        if (VALID_AMOUNTS.includes(m[1])) return m[1];
+    return null;
+};
+
+const hasRecentDate = (lowerText) => {
+    const MONTHS = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+    const now = new Date();
+    for (const offset of [0, -1]) {
+        const d = new Date(now); d.setDate(d.getDate() + offset);
+        const day = String(d.getDate()); const mon = MONTHS[d.getMonth()]; const mm = String(d.getMonth() + 1); const mmPad = mm.padStart(2, '0');
+        if (!lowerText.includes(day)) continue;
+        if ([mon, `/${mm}/`, `-${mm}-`, `/${mmPad}/`, `-${mmPad}-`].some(s => lowerText.includes(s))) return true;
+    }
+    return false;
+};
+
+const analyzeOCR = (rawText, utr, amount) => {
+    const t = rawText.toLowerCase();
+    const toMag = MAG_UPI_IDS.some(id => t.includes(id.toLowerCase()));
+    const checks = {
+        hasSuccess:    { w: 3, pass: /success|paid|completed|approved|received|payment\s*done/i.test(t) },
+        hasDate:       { w: 2, pass: hasRecentDate(t) },
+        hasUPI:        { w: 2, pass: /upi|phonepe|gpay|google\s*pay|paytm|bhim/i.test(t) },
+        hasUTR:        { w: 2, pass: !!utr },
+        isValidAmount: { w: 2, pass: !!(amount && VALID_AMOUNTS.includes(amount)) },
+        hasMagEsports: { w: 1, pass: toMag },
+    };
+    const earned = Object.values(checks).reduce((s, c) => s + (c.pass ? c.w : 0), 0);
+    const status = (checks.hasSuccess.pass && earned >= AUTO_VERIFY_MIN) ? '✅ AUTO-VERIFIED' : (checks.hasSuccess.pass && earned >= 4) ? '⚠️ PARTIAL MATCH' : '❌ FAKE/OLD';
+    return { status };
+};
+
+const isInvalidName = (name) => {
+    const lower = name.toLowerCase().trim();
+    const bad   = ['ok','done','yes','ha','hmm','ho gaya','hi','hello','bhai','bro','qr','pay','payment','ss','screenshot','mera','slot','book','jaldi','please','plz','team','naam','name'];
+    if (lower.length < 2 || bad.includes(lower) || /^[\d\s\W_]+$/.test(lower) || /^(.)\1{2,}$/.test(lower)) return true;
+    return false;
+};
+
+// ─────────────────────────────────────────────────────
+//  MESSAGING HELPERS
+// ─────────────────────────────────────────────────────
+const getWelcomeMessage = () => {
+    const miniSlots = maxSlots - getSlotCount('mini');
+    const megaSlots = maxSlots - getSlotCount('mega');
+    const miniFomo = getFomoText(miniSlots);
+    const megaFomo = getFomoText(megaSlots);
+
+    if (activeMode === 'mini') {
+        return `🎮 *MAG ESPORTS — LOBBY REGISTRATION*\n━━━━━━━━━━━━━━━━━━━━\n\nKonsi lobby leni hai?\n\n🟡 *MINI LOBBY*\n   💰 Price      : *₹${settings.miniPrice}*\n   🎟️ Status     : ${miniFomo}\n\n━━━━━━━━━━━━━━━━━━━━\n👉 *Mini* type karo ya *${settings.miniPrice}* bhejo\n━━━━━━━━━━━━━━━━━━━━`;
+    }
+    if (activeMode === 'mega') {
+        return `🎮 *MAG ESPORTS — LOBBY REGISTRATION*\n━━━━━━━━━━━━━━━━━━━━\n\nKonsi lobby leni hai?\n\n🔴 *MEGA LOBBY*\n   💰 Price      : *₹${settings.megaPrice}*\n   🎟️ Status     : ${megaFomo}\n\n━━━━━━━━━━━━━━━━━━━━\n👉 *Mega* type karo ya *${settings.megaPrice}* bhejo\n━━━━━━━━━━━━━━━━━━━━`;
+    }
+    return `🎮 *MAG ESPORTS — LOBBY REGISTRATION*\n━━━━━━━━━━━━━━━━━━━━\n\nKonsi lobby leni hai?\n\n🟡 *MINI LOBBY*\n   💰 Price      : *₹${settings.miniPrice}*\n   🎟️ Status     : ${miniFomo}\n\n🔴 *MEGA LOBBY*\n   💰 Price      : *₹${settings.megaPrice}*\n   🎟️ Status     : ${megaFomo}\n\n━━━━━━━━━━━━━━━━━━━━\n👉 *Mini* type karo — Mini Lobby ke liye\n👉 *Mega* type karo — Mega Lobby ke liye\n━━━━━━━━━━━━━━━━━━━━`;
+};
+
+const sendLobbyInfo = async (to, lobbyType) => {
+    const price     = lobbyType === 'Mega' ? settings.megaPrice : settings.miniPrice;
+    const slotsLeft = maxSlots - getSlotCount(lobbyType);
+    const fomo      = getFomoText(slotsLeft);
+
+    await client.sendMessage(to, `${lobbyType === 'Mega' ? '🔴' : '🟡'} *${lobbyType.toUpperCase()} LOBBY*\n━━━━━━━━━━━━━━━━━━━━\n💰 Entry Fee  : *₹${price}*\n🎟️ Status     : ${fomo}\n━━━━━━━━━━━━━━━━━━━━\n👇 QR scan karke *₹${price}* pay karo\naur payment ka screenshot bhejo.`);
+
+    if (fs.existsSync('./qr.png')) {
+        const qrImg = MessageMedia.fromFilePath('./qr.png');
+        await client.sendMessage(to, qrImg, { caption: `📲 Scan & Pay *₹${price}* → Screenshot bhejo` });
+    } else {
+        await client.sendMessage(to, `⚠️ QR image abhi available nahi. Admin se contact karo.`);
+    }
+};
+
+const processVerification = async (msg, teamName, lobbyType, paymentData) => {
+    const { media, status, utr, amount } = paymentData;
+    const cleanNumber = await getRealNumber(msg);
+    const displayNum  = `+${cleanNumber}`;
+    const rawId       = msg.from;
+    const link        = lobbyType === 'Mega' ? links.mega : links.mini;
+
+    if (status === '✅ AUTO-VERIFIED') {
+        if (isDuplicateUTR(utr)) {
+            await sendAdminMedia(media, `⚠️ DUPLICATE UTR BLOCKED!\nTeam: *${teamName}*\nLobby: *${lobbyType}*\nNumber: ${displayNum}\nID: ${rawId}\nUTR: ${utr}\n\nReply *ok* to force approve or *ban* to deny.`);
+            return msg.reply("⚠️ Payment already used lag raha hai. Admin check karega.");
+        }
+        saveRecord(teamName, cleanNumber, lobbyType, utr || 'N/A', amount || 'N/A');
+        await msg.reply(`✅ *PAYMENT VERIFIED!*\nTeam  : *${teamName}*\nLobby : *${lobbyType}*\n━━━━━━━━━━━━━━━━━━━━\n🔗 Group join karo 👇\n${link}`);
+        await sendAdminMedia(media, `✅ AUTO-VERIFIED\nTeam: *${teamName}*\nLobby: *${lobbyType}*\nNumber: ${displayNum}\nID: ${rawId}\nUTR: ${utr || 'N/A'}\n\nReply *ban* to revoke.`);
+    } else {
+        await sendAdminMedia(media, `🚨 MANUAL CHECK REQUIRED\nTeam: *${teamName}*\nLobby: *${lobbyType}*\nNumber: ${displayNum}\nID: ${rawId}\nStatus: ${status}\nUTR: ${utr || 'Not found'}\n\nReply *ok* to approve or *ban* to deny.`);
+        await msg.reply(`⏳ *Payment manual check pe gaya.*\nAdmin verify karega. Thoda wait karo. 🙏`);
+    }
+};
+
+const getRealNumber = async (msg) => { try { const c = await msg.getContact(); if (c?.number?.length >= 10) return c.number; } catch {} return msg.from.split('@')[0]; };
+const sendAdminMedia = async (media, caption) => { try { await client.sendMessage(client.info.wid._serialized, media, { caption }); } catch {} };
+
+// ─────────────────────────────────────────────────────
+//  CLIENT EVENTS
+// ─────────────────────────────────────────────────────
+client.on('qr',    qr => qrcode.generate(qr, { small: true }));
+client.on('ready', ()  => log('INFO', '✅ BOT READY'));
+client.on('auth_failure', m => log('ERROR', `Auth failed: ${m}`));
+client.on('disconnected', reason => { log('WARN', `Disconnected: ${reason}. Reinitializing in 5s...`); setTimeout(() => client.initialize(), 5000); });
+
+// ─────────────────────────────────────────────────────
+//  MESSAGE HANDLER
+// ─────────────────────────────────────────────────────
+client.on('message_create', async msg => {
+    try {
+        const rawText   = msg.body.trim();
+        const textLower = rawText.toLowerCase();
+        const cmd       = textLower.split(/\s+/)[0];
+        const isAdmin   = msg.fromMe || msg.from === '100334781354038@lid' || msg.from === client.info.wid._serialized;
+
+        // ══════════════════════════════════════════
+        //  ADMIN BLOCK
+        // ══════════════════════════════════════════
+        if (isAdmin) {
+            if (cmd === '.setlink') {
+                const parts = rawText.split(/\s+/); const type = parts[1]?.toLowerCase(); const linkMatch = rawText.match(/https?:\/\/[^\s]+/i);
+                if (linkMatch && (type === 'mini' || type === 'mega')) { links[type] = linkMatch[0]; saveLinks(); return msg.reply(`✅ *${type.toUpperCase()}* link updated.`); }
+                return msg.reply('⚠️ Usage: .setlink mini/mega <link>');
+            }
+            if (cmd === '.setprice') {
+                const parts = rawText.split(/\s+/); const type = parts[1]?.toLowerCase(); const price = parts[2];
+                if (type === 'mini' && price) { settings.miniPrice = price; saveSettings(); return msg.reply(`✅ Mini price: ₹${price}`); }
+                if (type === 'mega' && price) { settings.megaPrice = price; saveSettings(); return msg.reply(`✅ Mega price: ₹${price}`); }
+                return msg.reply('⚠️ Usage: .setprice mini/mega <amount>');
+            }
+            if (cmd === '.list') {
+                const records = readRecords(); if (!records.length) return msg.reply('📋 No registrations yet.');
+                const miniList = records.filter(r => r.lobbyType?.toLowerCase() === 'mini'); const megaList = records.filter(r => r.lobbyType?.toLowerCase() === 'mega');
+                let out = `📋 *SLOTLIST*\n\n`;
+                if (miniList.length) { out += `🟡 *MINI (${miniList.length}/${maxSlots})*\n`; miniList.forEach((r, i) => out += `${i+1}. ${r.teamName}\n`); }
+                if (megaList.length) { out += `\n🔴 *MEGA (${megaList.length}/${maxSlots})*\n`; megaList.forEach((r, i) => out += `${i+1}. ${r.teamName}\n`); }
+                return msg.reply(out);
+            }
+            if (cmd === '.clear') { safeWrite('./records.json', []); return msg.reply('🧹 Slotlist cleared.'); }
+            if (cmd === '.stats') {
+                const s = getStats(); return msg.reply(`📊 *BOT STATS*\n━━━━━━━━━━━━━━━\nTotal Registered : ${s.total}\nMini Slots       : ${s.mini}/${maxSlots}\nMega Slots       : ${s.mega}/${maxSlots}\nActive Mode      : ${activeMode.toUpperCase()}\n━━━━━━━━━━━━━━━`);
+            }
+            if (cmd === '.setslots') {
+                const n = parseInt(rawText.split(/\s+/)[1]); if (!isNaN(n) && n > 0) { maxSlots = n; return msg.reply(`✅ Max slots per lobby: *${n}*`); }
+            }
+            if (cmd === '.setmode') {
+                const val = rawText.split(/\s+/)[1]?.toLowerCase();
+                if (!['mini', 'mega', 'both'].includes(val)) return msg.reply(`⚠️ Usage: .setmode mini | mega | both`);
+                activeMode = val; saveMode(); return msg.reply(`✅ *Mode: ${activeMode.toUpperCase()}*`);
+            }
+            if (msg.hasQuotedMsg && (cmd === 'ok' || cmd === 'ban')) {
+                const body = (await msg.getQuotedMessage()).body || '';
+                const targetId = (body.match(/ID:\s*(\S+)/) || [])[1];
+                const cleanNumber = (body.match(/Number:\s*\+?(\d+)/) || [])[1] || (targetId ? targetId.split('@')[0] : null);
+                if (targetId) {
+                    const teamName = (body.match(/Team:\s*\*?([^\n*]+)\*?/) || [])[1]?.trim() || 'Unknown';
+                    const lobbyType = (body.match(/Lobby:\s*\*?([^\n*]+)\*?/i) || [])[1]?.trim() || 'Mini';
+                    if (cmd === 'ok') {
+                        saveRecord(teamName, cleanNumber, lobbyType, 'N/A', 'N/A');
+                        await client.sendMessage(targetId, `✅ *VERIFIED BY ADMIN!*\nTeam: *${teamName}*\n🔗 Link: ${lobbyType.toLowerCase().includes('mega') ? links.mega : links.mini}`);
+                        return msg.reply(`✅ Approved: ${teamName}`);
+                    }
+                    if (cmd === 'ban') {
+                        if (body.includes('AUTO-VERIFIED')) removeRecord(cleanNumber);
+                        await client.sendMessage(targetId, `🚫 *Payment Rejected!*\nSahi screenshot bhejo ya admin se contact karo.`);
+                        return msg.reply(`🚫 Rejected: ${teamName}`);
+                    }
+                }
+            }
+            const adminCmds = ['.setlink','.setprice','.list','.clear','.stats','.setslots','.setmode','ok','ban'];
+            if (!adminCmds.includes(cmd)) return;
+        }
+
+        // ══════════════════════════════════════════
+        //  PLAYER BLOCK
+        // ══════════════════════════════════════════
+        if (!isAdmin && isRateLimited(msg.from)) return msg.reply('🚦 Bahut saare messages bhej rahe ho. Thoda ruko.');
+
+        // ── Pending States ──
+        if (pendingPayments[msg.from]?.state === 'AWAITING_LOBBY') {
+            const pData = pendingPayments[msg.from]; touchSession(msg.from);
+            if (!textLower.includes('mini') && !textLower.includes('mega')) return msg.reply(`⚠️ Lobby select karo: Type *Mini* ya *Mega*`);
+            const lobbyType = textLower.includes('mega') ? 'Mega' : 'Mini';
+            if (activeMode !== 'both' && lobbyType.toLowerCase() !== activeMode) return msg.reply(`🚫 *${lobbyType} lobby abhi available nahi.*\n👉 Type: *${activeMode.charAt(0).toUpperCase() + activeMode.slice(1)}*`);
+            if (!isSlotsAvailable(lobbyType)) { clearSession(msg.from); return msg.reply(`😔 *${lobbyType} lobby full ho gayi!*`); }
+            pData.lobbyType = lobbyType; pData.state = 'AWAITING_TEAM_NAME'; touchSession(msg.from);
+            return msg.reply(`✅ *${lobbyType} Lobby* select ki!\n\nApna *Team Name* bhejo:`);
+        }
+        if (pendingPayments[msg.from]?.state === 'AWAITING_TEAM_NAME') {
+            const pData = pendingPayments[msg.from]; touchSession(msg.from);
+            if (isInvalidName(rawText)) return msg.reply('⚠️ Ek proper *Team Name* bhejo.');
+            if (!isSlotsAvailable(pData.lobbyType)) { clearSession(msg.from); return msg.reply(`🛑 *${pData.lobbyType} lobby full ho gayi!*`); }
+            clearSession(msg.from); return await processVerification(msg, rawText, pData.lobbyType, pData);
+        }
+
+        // ── Screenshot ──
+        if (msg.hasMedia) {
+            const media = await msg.downloadMedia();
+            if (!media?.mimetype?.startsWith('image/')) return msg.reply('🛑 Sirf *payment screenshot image* bhejo.');
+            await msg.reply('⏳ Screenshot check ho raha hai...');
+            try {
+                const buffer = Buffer.from(media.data, 'base64');
+                const { data: { text, confidence } } = await (await getOCRWorker()).recognize(buffer);
+                let statusObj = analyzeOCR(text, extractUTR(text), extractAmount(text));
+                if (Math.round(confidence) < OCR_MIN_CONF) statusObj.status = '⚠️ LOW IMAGE QUALITY';
+                const pData = { media, status: statusObj.status, utr: extractUTR(text), amount: extractAmount(text), state: 'AWAITING_LOBBY' };
+                
+                const anySlots = (activeMode === 'both') ? (isSlotsAvailable('mini') || isSlotsAvailable('mega')) : isSlotsAvailable(activeMode === 'mini' ? 'Mini' : 'Mega');
+                if (!anySlots) return msg.reply(`🛑 Slots full ho chuke hain!`);
+                pendingPayments[msg.from] = pData; touchSession(msg.from);
+                return msg.reply(`✅ *Screenshot receive ho gaya!*\nKaunsi lobby leni hai?\n👉 Type: *Mini* ya *Mega*`);
+            } catch (e) {
+                await resetOCRWorker();
+                pendingPayments[msg.from] = { media, status: '❌ OCR FAILED', state: 'AWAITING_LOBBY' }; touchSession(msg.from);
+                return msg.reply(`⚠️ Screenshot check me error aayi.\nKaunsi lobby leni hai? Type: *Mini* ya *Mega*`);
+            }
+        }
+
+        // ── SMART KEYWORD AI ENGINE ──
+        if (!msg.hasMedia && !pendingPayments[msg.from] && rawText.length > 0) {
+            
+            // 1. Direct "Mini", "Mega" or Prices (25, 30, 20/25 etc)
+            const pMini = settings.miniPrice.toString().toLowerCase();
+            const pMega = settings.megaPrice.toString().toLowerCase();
+            const hasMiniPrice = pMini.split('/').some(p => textLower.includes(p.trim()));
+            const hasMegaPrice = pMega.split('/').some(p => textLower.includes(p.trim()));
+
+            const wantsMini = textLower.includes('mini') || hasMiniPrice;
+            const wantsMega = textLower.includes('mega') || hasMegaPrice;
+            
+            // 2. Any QR or Payment related keyword (Dictionaries)
+            const asksQR = /qr|scan|pay|upi|kese|kaise|bhejo|number|send/i.test(textLower);
+
+            if (wantsMini || wantsMega || asksQR) {
+                if (antiSpam.has(msg.from)) return;
+                antiSpam.add(msg.from); setTimeout(() => antiSpam.delete(msg.from), 4000);
+
+                let targetLobby = null;
+                if (wantsMega && !wantsMini) targetLobby = 'Mega';
+                else if (wantsMini && !wantsMega) targetLobby = 'Mini';
+                else if (activeMode === 'mini') targetLobby = 'Mini';
+                else if (activeMode === 'mega') targetLobby = 'Mega';
+
+                if (targetLobby) {
+                    if (activeMode !== 'both' && targetLobby.toLowerCase() !== activeMode) return msg.reply(`🚫 *${targetLobby}* abhi available nahi hai.`);
+                    if (!isSlotsAvailable(targetLobby)) return msg.reply(`😔 *${targetLobby} lobby full ho gayi!*`);
+                    return await sendLobbyInfo(msg.from, targetLobby);
+                } else {
+                    // "both" mode is active, but they just said "QR" without specifying Mini or Mega
+                    if (fs.existsSync('./qr.png')) {
+                        const qrImg = MessageMedia.fromFilePath('./qr.png');
+                        return client.sendMessage(msg.from, qrImg, { 
+                            caption: `👇 *SCAN & PAY*\n\n🟡 *Mini:* ₹${settings.miniPrice}\n🔴 *Mega:* ₹${settings.megaPrice}\n\nPay karke screenshot bhejein.` 
+                        });
+                    } else {
+                        return msg.reply('⚠️ QR image missing.');
+                    }
+                }
+            }
+
+            // 3. Fallback Welcome Message (Only on Greetings/Menu)
+            const welcomeRegex = /\b(hi|hello|hey|menu|book|slot|slots|register|tourney|tournament|\?|help|details)\b/i;
+            if (welcomeRegex.test(textLower)) {
+                if (antiSpam.has(msg.from)) return;
+                antiSpam.add(msg.from); setTimeout(() => antiSpam.delete(msg.from), 5000);
+                return msg.reply(getWelcomeMessage());
+            }
+        }
+
+    } catch (e) {
+        log('ERROR', `Handler error: ${e.message}`);
+    }
+});
+
+client.initialize();

@@ -1,0 +1,24 @@
+const { Client, LocalAuth } = require('whatsapp-web.js');
+
+const client = new Client({ 
+    authStrategy: new LocalAuth(),
+    puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'] }
+});
+
+client.on('ready', () => {
+    console.log('\n✅ Bot Ready! Ab apne phone se us Group aur Channel me ek message (ya emoji) bhejo...\n');
+});
+
+// message_create tumhare khud ke bheje messages ko bhi read karta hai
+client.on('message_create', async msg => {
+    try {
+        const chat = await msg.getChat();
+        console.log(`📌 Chat Name: ${chat.name}`);
+        console.log(`🔑 Chat ID:   ${chat.id._serialized}`);
+        console.log('---------------------------------');
+    } catch (err) {
+        // Ignore errors for system messages
+    }
+});
+
+client.initialize();

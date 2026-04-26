@@ -1,0 +1,40 @@
+const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
+const fs = require('fs');
+
+const client = new Client({ authStrategy: new LocalAuth() });
+
+client.on('ready', () => {
+    console.log('Bot Ready! Channel aur Group dono me message jayega...');
+    
+    // Yahan apni asli Channel ID aur Group ID daalo
+    const targetIds = [
+        '120363XXXXXXXXXX@newsletter', // Aapke Channel ki ID
+        '1234567890-123456@g.us'       // Aapke Group ki ID
+    ]; 
+    
+    const imagePath = './image.jpg';
+    const captionText = 'Yeh mera auto message hai';
+
+    if (!fs.existsSync(imagePath)) {
+        console.error('❌ ERROR: image.jpg file nahi mili!');
+        process.exit(1);
+    }
+
+    const media = MessageMedia.fromFilePath(imagePath); 
+
+    const sendMessageToAll = () => {
+        targetIds.forEach(id => {
+            client.sendMessage(id, media, { caption: captionText })
+                .then(() => console.log(✅ Sent to ${id}))
+                .catch(err => console.error(❌ Error in ${id}:, err));
+        });
+    };
+
+    // Pehla message turant
+    sendMessageToAll();
+
+    // Har 5 min (300000 ms) mein repeat
+    setInterval(sendMessageToAll, 300000); 
+});
+
+client.initialize();

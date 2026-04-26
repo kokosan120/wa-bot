@@ -1,0 +1,46 @@
+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk                    paymentData.state = 'AWAITING_TEAM_NAME';
+                    pendingPayments[msg.from] = paymentData;
+                    return msg.reply("✅ Screenshot received! Apna *Team Name* type karke bhejo.");
+                }
+
+                if (!lobbyType) {
+                    paymentData.teamName = teamName;
+                    paymentData.state = 'AWAITING_LOBBY';
+                    pendingPayments[msg.from] = paymentData;
+                    return msg.reply(`✅ Team Name: *${teamName}*\n\nAb batao kaunsi lobby khelna hai?\nType karo: *Mega* ya *Mini*`);
+                }
+
+                const records = readRecords();
+                if (records.filter(r => r.lobbyType === lobbyType).length >= 12) {
+                    paymentData.teamName = teamName;
+                    paymentData.state = 'AWAITING_LOBBY';
+                    pendingPayments[msg.from] = paymentData;
+                    return msg.reply(`🛑 *${lobbyType}* Lobby full hai! Dusri try karne ke liye Mega ya Mini type karo.`);
+                }
+
+                await processVerification(msg, teamName, paymentData, lobbyType);
+
+            } catch (e) {
+                await resetOCRWorker();
+                pendingPayments[msg.from] = { media: null, status: '❌ OCR FAILED', utr: null, amount: null, state: 'AWAITING_TEAM_NAME' };
+                await msg.reply("⚠️ Screenshot me error hai. Phir bhi apna *Team Name* likh kar bhej do, hum manual check kar lenge.");
+            }
+            return;
+        }
+
+        // ==========================================
+        // 5. SMART BRAIN FOR PLAYERS
+        // ==========================================
+        if (!recentlyPaid.has(msg.from) && textLower.length > 1) {
+            if (/(hi|hello|menu|brochure|detail|\?)/.test(textLower)) {
+                antiSpam.add(msg.from);
+                setTimeout(() => antiSpam.delete(msg.from), 10000);
+                return msg.reply(getDynamicBrochure()); 
+            }
+        }
+    } catch (e) {
+        console.error("Message Block Error:", e);
+    }
+});
+
+client.initialize();

@@ -1,0 +1,11 @@
+{
+  "mode": "mini",
+  "miniPrice": "20",
+  "megaPrice": "35",
+  "lobbyTime": "3 PM",
+  "livePrice": "55",
+  "closedLobbies": [
+    "mini"
+  ],
+  "scrimName": "MAG ESPORTS"
+}
