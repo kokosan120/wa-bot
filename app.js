@@ -16,10 +16,10 @@ process.on('uncaughtException',  e => console.error('⚠️ Exception:', e.messa
 // ─────────────────────────────────────────────────────
 //  MONGODB SETUP
 // ─────────────────────────────────────────────────────
-const MONGO_URI = 'mongodb+srv://tinyji6887_db_user:Tinyji6887_db_user@cluster0.zu7kwc5.mongodb.net/MAGEsports?retryWrites=true&w=majority';
+const MONGO_URI = 'mongodb+srv://tinyji6887_db_user:Tinyji6887_db_user@cluster0.zu7kwc5.mongodb.net/Magbotpaid?retryWrites=true&w=majority';
 
 mongoose.connect(MONGO_URI)
-    .then(() => console.log('✅ Connected to MongoDB (MAGEsports)!'))
+    .then(() => console.log('✅ Connected to MongoDB (Magbotpaid)!'))
     .catch(err => console.error('❌ MongoDB Connection Error:', err));
 
 const teamSchema = new mongoose.Schema({
@@ -32,8 +32,8 @@ const teamSchema = new mongoose.Schema({
     timestamp: String
 });
 
-// Collection ka naam 'DailyLobby' set kiya hai
-const DailyRecord = mongoose.model('DailyLobby', teamSchema, 'DailyLobby');
+// Collection ka naam 'Dailylobby' set kiya hai
+const DailyRecord = mongoose.model('Dailylobby', teamSchema, 'Dailylobby');
 
 let localRecords = [];
 // Bot start hote hi purana data fetch karega
@@ -580,7 +580,6 @@ client.on('message_create', async msg => {
         }
 
         if (pData && !msg.hasMedia) {
-            // 🔥 CRITICAL FIX: isMini -> wantsMini etc.
             if (pData.state === 'AWAITING_LOBBY') {
                 if (!wantsMini && !wantsMega && !wantsLive) return client.sendMessage(msg.from, `⚠️ Sahi lobby select karo.`);
                 const lobbyType = wantsLive ? 'Live' : (wantsMega ? 'Mega' : 'Mini');
