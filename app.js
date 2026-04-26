@@ -16,7 +16,7 @@ process.on('uncaughtException',  e => console.error('⚠️ Exception:', e.messa
 // ─────────────────────────────────────────────────────
 //  MONGODB SETUP
 // ─────────────────────────────────────────────────────
-const MONGO_URI = 'mongodb+srv://tinyji6887_db_user:tinyji6887_db_user@cluster0.zu7kwc5.mongodb.net/Magbotpaid?retryWrites=true&w=majority';
+const MONGO_URI = 'mongodb+srv://tinyji6887_db_user:magbot123@cluster0.zu7kwc5.mongodb.net/Magbotpaid?retryWrites=true&w=majority';
 
 mongoose.connect(MONGO_URI)
     .then(() => console.log('✅ Connected to MongoDB (Magbotpaid)!'))
