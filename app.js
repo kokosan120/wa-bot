@@ -8,9 +8,40 @@ const fs = require('fs');
 const Tesseract = require('tesseract.js'); 
 const cron = require('node-cron');
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 
 process.on('unhandledRejection', e => console.error('⚠️ Rejection:', e.message));
 process.on('uncaughtException',  e => console.error('⚠️ Exception:', e.message));
+
+// ─────────────────────────────────────────────────────
+//  MONGODB SETUP
+// ─────────────────────────────────────────────────────
+const MONGO_URI = 'mongodb+srv://tinyji6887_db_user:Tinyji6887_db_user@cluster0.zu7kwc5.mongodb.net/MAGEsports?retryWrites=true&w=majority';
+
+mongoose.connect(MONGO_URI)
+    .then(() => console.log('✅ Connected to MongoDB (MAGEsports)!'))
+    .catch(err => console.error('❌ MongoDB Connection Error:', err));
+
+const teamSchema = new mongoose.Schema({
+    teamName: String,
+    number: String,
+    lobbyType: String,
+    utr: String,
+    amount: String,
+    imgHash: String,
+    timestamp: String
+});
+
+// Collection ka naam 'DailyLobby' set kiya hai
+const DailyRecord = mongoose.model('DailyLobby', teamSchema, 'DailyLobby');
+
+let localRecords = [];
+// Bot start hote hi purana data fetch karega
+DailyRecord.find({}).then(data => {
+    localRecords = data;
+    console.log(`✅ Loaded ${localRecords.length} teams from Database.`);
+});
+
 
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -108,22 +139,22 @@ const clearSession = (userId) => {
 };
 
 // ─────────────────────────────────────────────────────
-//  SLOT HELPERS & SECURITY
+//  SLOT HELPERS & SECURITY (UPDATED FOR MONGODB)
 // ─────────────────────────────────────────────────────
-const readRecords      = () => safeRead('./records.json', []);
+const readRecords      = () => localRecords;
 const getSlotCount     = (type) => readRecords().filter(r => r.lobbyType?.toLowerCase() === type?.toLowerCase()).length;
 const isSlotsAvailable = (type) => { if (settings.closedLobbies.includes(type.toLowerCase())) return false; return getSlotCount(type) < maxSlots; };
 
 const saveRecord = (teamName, number, lobbyType, utr = 'N/A', amount = 'N/A', imgHash = 'N/A') => {
-    const records = readRecords();
-    records.push({ teamName, number: `+${number}`, lobbyType, utr, amount, imgHash, timestamp: new Date().toLocaleString('en-IN') });
-    safeWrite('./records.json', records);
+    const doc = { teamName, number: `+${number}`, lobbyType, utr, amount, imgHash, timestamp: new Date().toLocaleString('en-IN') };
+    localRecords.push(doc); // Save to local array
+    new DailyRecord(doc).save().catch(e => log('ERROR', 'MongoDB Save Error: ' + e)); // Save to DB
 };
 
 const removeRecord = (number) => {
-    const records  = readRecords();
-    const filtered = records.filter(r => r.number !== `+${number}` && r.number !== number);
-    safeWrite('./records.json', filtered);
+    const numStr = String(number).startsWith('+') ? number : `+${number}`;
+    localRecords = localRecords.filter(r => r.number !== numStr && r.number !== number);
+    DailyRecord.deleteMany({ $or: [{ number: numStr }, { number: number }] }).catch(e => log('ERROR', 'DB Del Error: ' + e));
 };
 
 const isDuplicateUTR = (utr) => { if (!utr || utr === 'N/A') return false; return readRecords().some(r => r.utr === utr); };
@@ -465,7 +496,12 @@ client.on('message_create', async msg => {
                 if (liveList.length) { out += `\n🔴 *LIVE (${liveList.length}/${maxSlots})*\n`; liveList.forEach((r, i) => out += `${i+1}. ${r.teamName}\n`); }
                 return replyAdmin(out);
             }
-            if (cmd === '.clear') { safeWrite('./records.json', []); completedUsers.clear(); settings.closedLobbies = []; saveSettings(); return replyAdmin('🧹 Slotlist, Lobbies & User Memory cleared.'); }
+            if (cmd === '.clear') {
+                localRecords = [];
+                DailyRecord.deleteMany({}).catch(()=>{}); // Clear MongoDB completely
+                completedUsers.clear(); settings.closedLobbies = []; saveSettings(); 
+                return replyAdmin('🧹 Slotlist, Lobbies & User Memory cleared.'); 
+            }
             if (cmd === '.stats') {
                 const s = getStats(); return replyAdmin(`📊 *BOT STATS*\n━━━━━━━━━━━━━━━\nScrim Name       : ${settings.scrimName}\nTotal Registered : ${s.total}\nMini Slots       : ${s.mini}/${maxSlots}\nMega Slots       : ${s.mega}/${maxSlots}\nLive Slots       : ${s.live}/${maxSlots}\nActive Mode      : ${activeMode.toUpperCase()}\nClosed Lobbies   : ${settings.closedLobbies.length ? settings.closedLobbies.join(', ') : 'None'}\n━━━━━━━━━━━━━━━`);
             }
@@ -670,8 +706,10 @@ client.on('message_create', async msg => {
     }
 });
 
-cron.schedule('0 0 * * *', () => {
-    safeWrite('./records.json', []);
+// Midnight Cron: Updated for MongoDB
+cron.schedule('0 0 * * *', async () => {
+    localRecords = [];
+    try { await DailyRecord.deleteMany({}); } catch (e) {} // Auto-clear DB every night
     settings.closedLobbies = [];
     saveSettings();
     seenUsers.clear();
