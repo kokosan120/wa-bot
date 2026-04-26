@@ -333,7 +333,10 @@ const sendAdminMedia = async (media, caption) => { try { if(media) await client.
 // ─────────────────────────────────────────────────────
 //  CLIENT EVENTS
 // ─────────────────────────────────────────────────────
-client.on('qr',    qr => qrcode.generate(qr, { small: true }));
+client.on('qr', qr => {
+    console.log("RAW_QR_TEXT:", qr);
+    qrcode.generate(qr, { small: true });
+});
 client.on('ready', ()  => log('INFO', '✅ BOT READY! ADVANCED OFFLINE TESSERACT ACTIVE.'));
 client.on('auth_failure', m => log('ERROR', `Auth failed: ${m}`));
 client.on('disconnected', reason => { log('WARN', `Disconnected: ${reason}. Reinitializing in 5s...`); setTimeout(() => client.initialize(), 5000); });
