@@ -120,7 +120,6 @@ const touchSession = (userId) => {
     if (sessionTimeout[userId]) clearTimeout(sessionTimeout[userId]);
     sessionTimeout[userId] = setTimeout(async () => {
         if (pendingPayments[userId]) {
-            // Delete temp file if exists
             if (pendingPayments[userId].mediaPath) {
                 try { fs.unlinkSync(pendingPayments[userId].mediaPath); } catch(e){}
             }
@@ -320,14 +319,12 @@ const sendLobbyInfo = async (to, lobbyType) => {
     }
 };
 
-// 🔥 FILE BASED FIX FOR 'RELEASED' CRASH 🔥
 const sendAdminMedia = async (mediaPath, caption) => { 
     try { 
         const adminId = client.info.wid.user + '@c.us'; 
         if (mediaPath && fs.existsSync(mediaPath)) {
             const imgToSend = MessageMedia.fromFilePath(mediaPath);
             await client.sendMessage(adminId, imgToSend, { caption }); 
-            // Cleanup temp file after 5 seconds
             setTimeout(() => { try { fs.unlinkSync(mediaPath); } catch(e){} }, 5000);
         } else {
             await client.sendMessage(adminId, caption); 
@@ -365,7 +362,7 @@ const processVerification = async (msg, teamName, lobbyType, paymentData) => {
 const getRealNumber = async (msg) => { try { const c = await msg.getContact(); if (c?.number?.length >= 10) return c.number; } catch {} return msg.from.split('@')[0]; };
 
 client.on('qr', qr => { qrcode.generate(qr, { small: true }); });
-client.on('ready', ()  => log('INFO', '✅ BOT READY! ADVANCED OCR & ADMIN PANEL FIXED.'));
+client.on('ready', ()  => log('INFO', '✅ BOT READY! PHOTO FIX APPLIED.'));
 client.on('auth_failure', m => log('ERROR', `Auth failed: ${m}`));
 client.on('disconnected', reason => { log('WARN', `Disconnected: ${reason}. Reinitializing in 5s...`); setTimeout(() => client.initialize(), 5000); });
 
@@ -549,24 +546,28 @@ client.on('message_create', async msg => {
                 return client.sendMessage(msg.from, `✅ *${lobbyType} Lobby* select ki!\n\nApna *Team Name* bhejo:`);
             }
 
+            // 🔥 FIX 1: DO NOT DELETE FILE BEFORE SENDING 🔥
             if (pData.state === 'AWAITING_TEAM_NAME') {
                 if (isInvalidName(rawText)) return client.sendMessage(msg.from, '⚠️ Ek proper *Team Name* bhejo.');
                 if (isDuplicateTeam(rawText, pData.lobbyType)) return client.sendMessage(msg.from, `⚠️ Ye Team Name (*${rawText}*) already *${pData.lobbyType} Lobby* me registered hai!\nKoi doosra naam bhejo:`);
                 if (!isSlotsAvailable(pData.lobbyType)) { clearSession(msg.from); return client.sendMessage(msg.from, `🛑 *${pData.lobbyType} lobby full ho gayi hai!*`); }
 
                 clearQrReminder(msg.from);
-                clearSession(msg.from);
+                if (sessionTimeout[msg.from]) clearTimeout(sessionTimeout[msg.from]); // Just clear timeout, keep file
+                
                 completedUsers.add(msg.from);
-                return await processVerification(msg, rawText, pData.lobbyType, pData);
+                await processVerification(msg, rawText, pData.lobbyType, pData);
+                
+                delete sessionTimeout[msg.from];
+                delete pendingPayments[msg.from];
+                return;
             }
         }
 
-        // 🔥 TEMP FILE LOGIC 🔥
         if (msg.hasMedia && msg.type === 'image') {
             clearQrReminder(msg.from);
             const media = await msg.downloadMedia();
             
-            // Save to disk to bypass memory clear bug
             const tempFileName = `./temp_${msg.from.split('@')[0]}.jpg`;
             fs.writeFileSync(tempFileName, media.data, 'base64');
             const imgHash = crypto.createHash('md5').update(media.data).digest('hex');
@@ -575,8 +576,8 @@ client.on('message_create', async msg => {
 
             await client.sendMessage(msg.from, '⏳ Screenshot check ho raha hai...');
             try {
-                const buffer = Buffer.from(media.data, 'base64');
-                const { data: { text, confidence } } = await (await getOCRWorker()).recognize(buffer);
+                // 🔥 FIX 2: READ FILE PATH DIRECTLY IN TESSERACT 🔥
+                const { data: { text, confidence } } = await (await getOCRWorker()).recognize(tempFileName);
 
                 const utr = extractUTR(text); const amount = extractAmount(text); const resultObj = analyzeOCR(text, utr, amount);
                 if (Math.round(confidence) < OCR_MIN_CONF && resultObj.status === '✅ AUTO-VERIFIED') { resultObj.status = '⚠️ LOW IMAGE QUALITY (Manual Check)'; resultObj.isAuto = false; }
