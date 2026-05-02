@@ -120,9 +120,6 @@ const touchSession = (userId) => {
     if (sessionTimeout[userId]) clearTimeout(sessionTimeout[userId]);
     sessionTimeout[userId] = setTimeout(async () => {
         if (pendingPayments[userId]) {
-            if (pendingPayments[userId].mediaPath) {
-                try { fs.unlinkSync(pendingPayments[userId].mediaPath); } catch(e){}
-            }
             delete pendingPayments[userId];
             try { await client.sendMessage(userId, '⌛ *Session timeout ho gayi.*\nDobara screenshot bhejo to restart karo.'); } catch {}
         }
@@ -131,9 +128,6 @@ const touchSession = (userId) => {
 
 const clearSession = (userId) => {
     if (sessionTimeout[userId]) clearTimeout(sessionTimeout[userId]);
-    if (pendingPayments[userId] && pendingPayments[userId].mediaPath) {
-        try { fs.unlinkSync(pendingPayments[userId].mediaPath); } catch(e){}
-    }
     delete sessionTimeout[userId]; delete pendingPayments[userId];
 };
 
@@ -319,23 +313,29 @@ const sendLobbyInfo = async (to, lobbyType) => {
     }
 };
 
-const sendAdminMedia = async (mediaPath, caption) => { 
-    try { 
-        const adminId = client.info.wid.user + '@c.us'; 
-        if (mediaPath && fs.existsSync(mediaPath)) {
-            const imgToSend = MessageMedia.fromFilePath(mediaPath);
+// 🔥 BULLETPROOF FIX: Pure Base64 Storage & Text Fallback 🔥
+const sendAdminMedia = async (base64, mimetype, caption) => { 
+    const adminId = client.info.wid._serialized.replace(/:\d+/, ''); 
+    if (base64 && mimetype) {
+        try { 
+            const imgToSend = new MessageMedia(mimetype, base64, 'screenshot.jpg');
             await client.sendMessage(adminId, imgToSend, { caption }); 
-            setTimeout(() => { try { fs.unlinkSync(mediaPath); } catch(e){} }, 5000);
-        } else {
-            await client.sendMessage(adminId, caption); 
-        }
-    } catch (e) {
-        console.error('❌ Admin Message Failed:', e.message);
-    } 
+            return; // Success!
+        } catch (e) {
+            console.error('❌ Admin Image Send Failed:', e.message);
+            // It will continue to the fallback below if image sending fails.
+        } 
+    }
+    // FALLBACK: Always send text if image is missing or crashes
+    try {
+        await client.sendMessage(adminId, `⚠️ [SCREENSHOT LOAD FAILED - CHECK USER CHAT]\n\n${caption}`);
+    } catch(err) {
+        console.error('❌ Admin Fallback Failed:', err.message);
+    }
 };
 
 const processVerification = async (msg, teamName, lobbyType, paymentData) => {
-    const { mediaPath, status, utr, amount, imgHash, isAuto } = paymentData;
+    const { base64, mimetype, status, utr, amount, imgHash, isAuto } = paymentData;
     const cleanNumber = await getRealNumber(msg);
     const rawId       = msg.from;
 
@@ -347,14 +347,14 @@ const processVerification = async (msg, teamName, lobbyType, paymentData) => {
 
     if (isAuto || status === '✅ AUTO-VERIFIED') {
         if (isDuplicateUTR(utr)) {
-            await sendAdminMedia(mediaPath, `⚠️ DUPLICATE UTR BLOCKED!\n${adminDetails}\n\nReply *ok* to force approve or *ban* to deny.`);
+            await sendAdminMedia(base64, mimetype, `⚠️ DUPLICATE UTR BLOCKED!\n${adminDetails}\n\nReply *ok* to force approve or *ban* to deny.`);
             return client.sendMessage(msg.from, "⚠️ Ye payment already register ho chuki hai. Admin check karega.");
         }
         saveRecord(teamName, cleanNumber, lobbyType, utr || 'N/A', amount || 'N/A', imgHash);
         await client.sendMessage(msg.from, `✅ *PAYMENT VERIFIED!*\nTeam: *${teamName}*\nLobby: *${lobbyType}*\n━━━━━━━━━━━━━━━━━━━━\n🔗 Group join karo 👇\n${link}`);
-        await sendAdminMedia(mediaPath, `✅ AUTO-VERIFIED\n${adminDetails}\n\nReply *ban* to revoke.`);
+        await sendAdminMedia(base64, mimetype, `✅ AUTO-VERIFIED\n${adminDetails}\n\nReply *ban* to revoke.`);
     } else {
-        await sendAdminMedia(mediaPath, `🚨 MANUAL CHECK REQUIRED\n${adminDetails}\nStatus: ${status}\n\nReply *ok* to approve or *ban* to deny.`);
+        await sendAdminMedia(base64, mimetype, `🚨 MANUAL CHECK REQUIRED\n${adminDetails}\nStatus: ${status}\n\nReply *ok* to approve or *ban* to deny.`);
         await client.sendMessage(msg.from, `⏳ *Payment manual check pe gaya.*\nAdmin verify karega. Thoda wait karo. 🙏`);
     }
 };
@@ -362,7 +362,7 @@ const processVerification = async (msg, teamName, lobbyType, paymentData) => {
 const getRealNumber = async (msg) => { try { const c = await msg.getContact(); if (c?.number?.length >= 10) return c.number; } catch {} return msg.from.split('@')[0]; };
 
 client.on('qr', qr => { qrcode.generate(qr, { small: true }); });
-client.on('ready', ()  => log('INFO', '✅ BOT READY! PHOTO FIX APPLIED.'));
+client.on('ready', ()  => log('INFO', '✅ BOT READY! BASE64 FIX APPLIED.'));
 client.on('auth_failure', m => log('ERROR', `Auth failed: ${m}`));
 client.on('disconnected', reason => { log('WARN', `Disconnected: ${reason}. Reinitializing in 5s...`); setTimeout(() => client.initialize(), 5000); });
 
@@ -377,7 +377,7 @@ client.on('message_create', async msg => {
         const textLower = rawText.toLowerCase();
         const cmd       = textLower.split(/\s+/)[0];
         
-        const adminId = client.info.wid.user + '@c.us';
+        const adminId = client.info.wid._serialized.replace(/:\d+/, '');
         const isAdmin = msg.fromMe || msg.from === adminId || msg.from === client.info.wid._serialized;
 
         if (msg.isStatus) return;
@@ -546,38 +546,39 @@ client.on('message_create', async msg => {
                 return client.sendMessage(msg.from, `✅ *${lobbyType} Lobby* select ki!\n\nApna *Team Name* bhejo:`);
             }
 
-            // 🔥 FIX 1: DO NOT DELETE FILE BEFORE SENDING 🔥
             if (pData.state === 'AWAITING_TEAM_NAME') {
                 if (isInvalidName(rawText)) return client.sendMessage(msg.from, '⚠️ Ek proper *Team Name* bhejo.');
                 if (isDuplicateTeam(rawText, pData.lobbyType)) return client.sendMessage(msg.from, `⚠️ Ye Team Name (*${rawText}*) already *${pData.lobbyType} Lobby* me registered hai!\nKoi doosra naam bhejo:`);
                 if (!isSlotsAvailable(pData.lobbyType)) { clearSession(msg.from); return client.sendMessage(msg.from, `🛑 *${pData.lobbyType} lobby full ho gayi hai!*`); }
 
                 clearQrReminder(msg.from);
-                if (sessionTimeout[msg.from]) clearTimeout(sessionTimeout[msg.from]); // Just clear timeout, keep file
+                if (sessionTimeout[msg.from]) clearTimeout(sessionTimeout[msg.from]); // Keep data, just stop timeout
                 
                 completedUsers.add(msg.from);
                 await processVerification(msg, rawText, pData.lobbyType, pData);
                 
                 delete sessionTimeout[msg.from];
-                delete pendingPayments[msg.from];
+                delete pendingPayments[msg.from]; // Final cleanup
                 return;
             }
         }
 
+        // 🔥 PURE BASE64 LOGIC - Memory/Hard Disk Bypass 🔥
         if (msg.hasMedia && msg.type === 'image') {
             clearQrReminder(msg.from);
             const media = await msg.downloadMedia();
+            if (!media || !media.data) return client.sendMessage(msg.from, "⚠️ Image download fail ho gayi, dobara bhejo.");
             
-            const tempFileName = `./temp_${msg.from.split('@')[0]}.jpg`;
-            fs.writeFileSync(tempFileName, media.data, 'base64');
-            const imgHash = crypto.createHash('md5').update(media.data).digest('hex');
+            const base64Data = media.data;
+            const mimeType = media.mimetype;
+            const imgHash = crypto.createHash('md5').update(base64Data).digest('hex');
             
             if (isDuplicateHash(imgHash)) return client.sendMessage(msg.from, "⚠️ Bhai ye screenshot pehle hi kisi dusri team ne register kar liya hai! Ek photo do baar use nahi ho sakti. 🚫");
 
             await client.sendMessage(msg.from, '⏳ Screenshot check ho raha hai...');
             try {
-                // 🔥 FIX 2: READ FILE PATH DIRECTLY IN TESSERACT 🔥
-                const { data: { text, confidence } } = await (await getOCRWorker()).recognize(tempFileName);
+                const buffer = Buffer.from(base64Data, 'base64');
+                const { data: { text, confidence } } = await (await getOCRWorker()).recognize(buffer);
 
                 const utr = extractUTR(text); const amount = extractAmount(text); const resultObj = analyzeOCR(text, utr, amount);
                 if (Math.round(confidence) < OCR_MIN_CONF && resultObj.status === '✅ AUTO-VERIFIED') { resultObj.status = '⚠️ LOW IMAGE QUALITY (Manual Check)'; resultObj.isAuto = false; }
@@ -597,11 +598,11 @@ client.on('message_create', async msg => {
                 if (!detectedLobby && !['all', 'both', 'minilive'].includes(activeMode)) detectedLobby = activeMode.charAt(0).toUpperCase() + activeMode.slice(1);
 
                 if (detectedLobby) {
-                    pendingPayments[msg.from] = { mediaPath: tempFileName, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_TEAM_NAME', lobbyType: detectedLobby };
+                    pendingPayments[msg.from] = { base64: base64Data, mimetype: mimeType, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_TEAM_NAME', lobbyType: detectedLobby };
                     touchSession(msg.from);
                     return client.sendMessage(msg.from, `✅ Screenshot mila! (₹${amount || '?'})\nLobby: *${detectedLobby}*\n\n👉 Verification ke liye apna *Team Name* bhejo:`);
                 } else {
-                    pendingPayments[msg.from] = { mediaPath: tempFileName, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_LOBBY', lobbyType: null };
+                    pendingPayments[msg.from] = { base64: base64Data, mimetype: mimeType, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_LOBBY', lobbyType: null };
                     touchSession(msg.from);
                     let askMsg = `✅ Screenshot receive ho gaya!\nKaunsi lobby leni hai?\n👉 `;
                     if (activeMode === 'all') askMsg += `Type: *Mini*, *Mega* ya *Live*`;
@@ -612,8 +613,7 @@ client.on('message_create', async msg => {
                 }
             } catch (e) {
                 await resetOCRWorker();
-                pendingPayments[msg.from] = { mediaPath: null, status: '❌ OCR SCAN FAILED', state: 'AWAITING_LOBBY' }; touchSession(msg.from);
-                try { fs.unlinkSync(tempFileName); } catch(err){}
+                pendingPayments[msg.from] = { base64: null, mimetype: null, status: '❌ OCR SCAN FAILED', state: 'AWAITING_LOBBY' }; touchSession(msg.from);
                 return client.sendMessage(msg.from, `⚠️ Screenshot scan me error aayi. Please lobby select karein.`);
             }
         }
