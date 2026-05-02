@@ -24,28 +24,16 @@ mongoose.connect(MONGO_URI)
     .catch(err => console.error('❌ MongoDB Connection Error:', err));
 
 const teamSchema = new mongoose.Schema({
-    teamName: String, 
-    number: String, 
-    lobbyType: String,
-    utr: String, 
-    amount: String, 
-    imgHash: String, 
-    timestamp: String
+    teamName: String, number: String, lobbyType: String,
+    utr: String, amount: String, imgHash: String, timestamp: String
 });
 const DailyRecord = mongoose.model('Dailylobby', teamSchema, 'Dailylobby');
 
-// Temp Session Schema (Auto-deletes after 10 mins)
+// 🔥 FIX: Ab Base64 ki jagah mediaPath save hoga
 const sessionSchema = new mongoose.Schema({
-    phone: String, 
-    base64: String, 
-    mimetype: String, 
-    status: String,
-    isAuto: Boolean, 
-    utr: String, 
-    amount: String, 
-    imgHash: String,
-    state: String, 
-    lobbyType: String,
+    phone: String, mediaPath: String, status: String,
+    isAuto: Boolean, utr: String, amount: String, imgHash: String,
+    state: String, lobbyType: String,
     createdAt: { type: Date, default: Date.now, expires: 600 } 
 });
 const TempSession = mongoose.model('TempSession', sessionSchema, 'TempSession');
@@ -61,9 +49,6 @@ const client = new Client({
     puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'], headless: true, timeout: 60000 }
 });
 
-// ─────────────────────────────────────────────────────
-//  HELPERS & STATE
-// ─────────────────────────────────────────────────────
 const safeRead  = (file, fallback) => { try { if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8')); } catch {} return fallback; };
 const safeWrite = (file, data) => { try { fs.writeFileSync(file, JSON.stringify(data, null, 2)); } catch(e) {} };
 
@@ -83,10 +68,8 @@ let maxSlots          = 24;
 
 let activeMode = safeRead('./mode.json', { mode: 'both' }).mode;
 const saveMode = () => safeWrite('./mode.json', { mode: activeMode });
-
 let links = safeRead('./links.json', { mini: 'https://chat.whatsapp.com/xxx', mega: 'https://chat.whatsapp.com/yyy', live: 'https://chat.whatsapp.com/zzz' });
 const saveLinks = () => safeWrite('./links.json', links);
-
 let settings = safeRead('./settings.json', { scrimName: 'MAG ESPORTS', miniPrice: '20/25', megaPrice: '35/45', livePrice: '55', lobbyTime: '9 PM', closedLobbies: [] });
 if (!settings.closedLobbies) settings.closedLobbies = [];
 const saveSettings = () => safeWrite('./settings.json', settings);
@@ -94,19 +77,13 @@ const saveSettings = () => safeWrite('./settings.json', settings);
 const MAG_UPI_IDS = ['8823827920@okbizaxis', '8823827920', 'mag esports', 'magesports', 'mag_esports', 'mac esports', 'maq esports', '882382792o', 'chetan bhul', 'chetan'];
 const OCR_MIN_CONF = 30;
 
-const getValidPrices = () => {
-    const allStr = `${settings.miniPrice} ${settings.megaPrice} ${settings.livePrice}`;
-    return allStr.match(/\d+/g) || [];
-};
+const getValidPrices = () => { return `${settings.miniPrice} ${settings.megaPrice} ${settings.livePrice}`.match(/\d+/g) || []; };
 
 const saveSession = async (phone, data) => {
     data.createdAt = new Date();
     await TempSession.findOneAndUpdate({ phone }, data, { upsert: true });
 };
-
-const clearSession = async (phone) => { 
-    await TempSession.deleteOne({ phone }); 
-};
+const clearSession = async (phone) => { await TempSession.deleteOne({ phone }); };
 
 const setQrReminder = (userId) => {
     if (qrReminders[userId]) clearTimeout(qrReminders[userId]);
@@ -120,13 +97,7 @@ const setQrReminder = (userId) => {
         delete qrReminders[userId];
     }, 5 * 60 * 1000);
 };
-
-const clearQrReminder = (userId) => { 
-    if (qrReminders[userId]) { 
-        clearTimeout(qrReminders[userId]); 
-        delete qrReminders[userId]; 
-    } 
-};
+const clearQrReminder = (userId) => { if (qrReminders[userId]) { clearTimeout(qrReminders[userId]); delete qrReminders[userId]; } };
 
 const isRateLimited = (userId) => {
     const now = Date.now();
@@ -139,10 +110,7 @@ const isRateLimited = (userId) => {
 
 const readRecords      = () => localRecords;
 const getSlotCount     = (type) => readRecords().filter(r => r.lobbyType?.toLowerCase() === type?.toLowerCase()).length;
-const isSlotsAvailable = (type) => { 
-    if (settings.closedLobbies.includes(type.toLowerCase())) return false; 
-    return getSlotCount(type) < maxSlots; 
-};
+const isSlotsAvailable = (type) => { if (settings.closedLobbies.includes(type.toLowerCase())) return false; return getSlotCount(type) < maxSlots; };
 
 const saveRecord = (teamName, number, lobbyType, utr = 'N/A', amount = 'N/A', imgHash = 'N/A') => {
     const istTimestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
@@ -297,24 +265,28 @@ const sendLobbyInfo = async (to, lobbyType) => {
     }
 };
 
-const sendAdminMedia = async (base64, mimetype, caption) => { 
+// 🔥 FIX: 100% STABLE ADMIN MEDIA SENDER 🔥
+const sendAdminMedia = async (mediaPath, caption) => { 
     const adminId = client.info.wid.user + '@c.us'; 
-    if (base64 && mimetype) {
+    if (mediaPath && fs.existsSync(mediaPath)) {
         try { 
-            const imgToSend = new MessageMedia(mimetype, base64, 'screenshot.jpg');
+            const imgToSend = MessageMedia.fromFilePath(mediaPath);
             await client.sendMessage(adminId, imgToSend, { caption }); 
+            // Send hone ke baad hi delete karega
+            setTimeout(() => { try { fs.unlinkSync(mediaPath); } catch(e){} }, 5000);
             return;
         } catch (e) { 
             console.error('❌ Admin Image Send Failed:', e.message); 
         } 
     }
+    // Agar image na mile ya crash ho, toh ye safe text jayega!
     try { 
-        await client.sendMessage(adminId, `⚠️ [SCREENSHOT LOAD FAILED - CHECK CHAT]\n\n${caption}`); 
+        await client.sendMessage(adminId, `⚠️ [SCREENSHOT NOT FOUND - CHECK CHAT DIRECTLY]\n\n${caption}`); 
     } catch(err) {}
 };
 
 const processVerification = async (msg, teamName, lobbyType, paymentData) => {
-    const { base64, mimetype, status, utr, amount, imgHash, isAuto } = paymentData;
+    const { mediaPath, status, utr, amount, imgHash, isAuto } = paymentData;
     const cleanNumber = await getRealNumber(msg);
     const rawId       = msg.from;
 
@@ -326,14 +298,14 @@ const processVerification = async (msg, teamName, lobbyType, paymentData) => {
 
     if (isAuto || status === '✅ AUTO-VERIFIED') {
         if (isDuplicateUTR(utr)) {
-            await sendAdminMedia(base64, mimetype, `⚠️ DUPLICATE UTR BLOCKED!\n${adminDetails}\n\nReply *ok* to force approve or *ban* to deny.`);
+            await sendAdminMedia(mediaPath, `⚠️ DUPLICATE UTR BLOCKED!\n${adminDetails}\n\nReply *ok* to force approve or *ban* to deny.`);
             return client.sendMessage(msg.from, "⚠️ Ye payment already register ho chuki hai. Admin check karega.");
         }
         saveRecord(teamName, cleanNumber, lobbyType, utr || 'N/A', amount || 'N/A', imgHash);
         await client.sendMessage(msg.from, `✅ *PAYMENT VERIFIED!*\nTeam: *${teamName}*\nLobby: *${lobbyType}*\n━━━━━━━━━━━━━━━━━━━━\n🔗 Group join karo 👇\n${link}`);
-        await sendAdminMedia(base64, mimetype, `✅ AUTO-VERIFIED\n${adminDetails}\n\nReply *ban* to revoke.`);
+        await sendAdminMedia(mediaPath, `✅ AUTO-VERIFIED\n${adminDetails}\n\nReply *ban* to revoke.`);
     } else {
-        await sendAdminMedia(base64, mimetype, `🚨 MANUAL CHECK REQUIRED\n${adminDetails}\nStatus: ${status}\n\nReply *ok* to approve or *ban* to deny.`);
+        await sendAdminMedia(mediaPath, `🚨 MANUAL CHECK REQUIRED\n${adminDetails}\nStatus: ${status}\n\nReply *ok* to approve or *ban* to deny.`);
         await client.sendMessage(msg.from, `⏳ *Payment manual check pe gaya.*\nAdmin verify karega. Thoda wait karo. 🙏`);
     }
 };
@@ -341,7 +313,7 @@ const processVerification = async (msg, teamName, lobbyType, paymentData) => {
 const getRealNumber = async (msg) => { try { const c = await msg.getContact(); if (c?.number?.length >= 10) return c.number; } catch {} return msg.from.split('@')[0]; };
 
 client.on('qr', qr => { qrcode.generate(qr, { small: true }); });
-client.on('ready', ()  => log('INFO', '✅ BOT READY! MONGODB SESSIONS ACTIVE.'));
+client.on('ready', ()  => log('INFO', '✅ BOT READY! ADVANCED STABLE VERSION LOADED.'));
 client.on('auth_failure', m => log('ERROR', `Auth failed: ${m}`));
 client.on('disconnected', reason => { log('WARN', `Disconnected: ${reason}. Reinitializing in 5s...`); setTimeout(() => client.initialize(), 5000); });
 
@@ -361,9 +333,6 @@ client.on('message_create', async msg => {
         if (msg.isStatus) return;
         if (msg.fromMe && !rawText.startsWith('.') && !['ok', 'ban'].includes(textLower)) return;
 
-        // ══════════════════════════════════════════
-        //  ADMIN COMMANDS
-        // ══════════════════════════════════════════
         if (isAdmin) {
             const replyAdmin = (text) => client.sendMessage(msg.from, text);
             
@@ -497,9 +466,6 @@ client.on('message_create', async msg => {
             if (adminCmds.includes(cmd)) return;
         }
 
-        // ══════════════════════════════════════════
-        //  PLAYER BLOCK
-        // ══════════════════════════════════════════
         if (isRateLimited(msg.from)) return;
         if (antiSpam.has(msg.from)) return;
         antiSpam.add(msg.from);
@@ -553,26 +519,31 @@ client.on('message_create', async msg => {
                 clearQrReminder(msg.from);
                 completedUsers.add(msg.from);
                 
+                // OCR Process start
                 await processVerification(msg, rawText, pData.lobbyType, pData);
                 await clearSession(msg.from); 
                 return;
             }
         }
 
+        // 🔥 FILE CREATION ON DISK 🔥
         if (msg.hasMedia && msg.type === 'image') {
             clearQrReminder(msg.from);
             const media = await msg.downloadMedia();
             if (!media || !media.data) return client.sendMessage(msg.from, "⚠️ Image download fail ho gayi, dobara bhejo.");
             
-            const base64Data = media.data;
-            const mimeType = media.mimetype;
-            const imgHash = crypto.createHash('md5').update(base64Data).digest('hex');
+            const tempFileName = `./temp_${msg.from.split('@')[0]}.jpg`;
+            fs.writeFileSync(tempFileName, media.data, 'base64');
+            const imgHash = crypto.createHash('md5').update(media.data).digest('hex');
             
-            if (isDuplicateHash(imgHash)) return client.sendMessage(msg.from, "⚠️ Bhai ye screenshot pehle hi kisi dusri team ne register kar liya hai! Ek photo do baar use nahi ho sakti. 🚫");
+            if (isDuplicateHash(imgHash)) {
+                try { fs.unlinkSync(tempFileName); } catch(e){}
+                return client.sendMessage(msg.from, "⚠️ Bhai ye screenshot pehle hi kisi dusri team ne register kar liya hai! Ek photo do baar use nahi ho sakti. 🚫");
+            }
 
             await client.sendMessage(msg.from, '⏳ Screenshot check ho raha hai...');
             try {
-                const buffer = Buffer.from(base64Data, 'base64');
+                const buffer = Buffer.from(media.data, 'base64');
                 const { data: { text, confidence } } = await (await getOCRWorker()).recognize(buffer);
 
                 const utr = extractUTR(text); 
@@ -602,10 +573,10 @@ client.on('message_create', async msg => {
                 if (!detectedLobby && !['all', 'both', 'minilive'].includes(activeMode)) detectedLobby = activeMode.charAt(0).toUpperCase() + activeMode.slice(1);
 
                 if (detectedLobby) {
-                    await saveSession(msg.from, { base64: base64Data, mimetype: mimeType, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_TEAM_NAME', lobbyType: detectedLobby });
+                    await saveSession(msg.from, { mediaPath: tempFileName, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_TEAM_NAME', lobbyType: detectedLobby });
                     return client.sendMessage(msg.from, `✅ Screenshot mila! (₹${amount || '?'})\nLobby: *${detectedLobby}*\n\n👉 Verification ke liye apna *Team Name* bhejo:`);
                 } else {
-                    await saveSession(msg.from, { base64: base64Data, mimetype: mimeType, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_LOBBY', lobbyType: null });
+                    await saveSession(msg.from, { mediaPath: tempFileName, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_LOBBY', lobbyType: null });
                     let askMsg = `✅ Screenshot receive ho gaya!\nKaunsi lobby leni hai?\n👉 `;
                     if (activeMode === 'all') askMsg += `Type: *Mini*, *Mega* ya *Live*`;
                     else if (activeMode === 'both') askMsg += `Type: *Mini* ya *Mega*`;
@@ -615,7 +586,8 @@ client.on('message_create', async msg => {
                 }
             } catch (e) {
                 await resetOCRWorker();
-                await saveSession(msg.from, { base64: null, mimetype: null, status: '❌ OCR SCAN FAILED', state: 'AWAITING_LOBBY' });
+                await saveSession(msg.from, { mediaPath: null, status: '❌ OCR SCAN FAILED', state: 'AWAITING_LOBBY' });
+                try { fs.unlinkSync(tempFileName); } catch(err){}
                 return client.sendMessage(msg.from, `⚠️ Screenshot scan me error aayi. Please lobby select karein.`);
             }
         }
@@ -665,10 +637,18 @@ client.on('message_create', async msg => {
     }
 });
 
+// CRON JOB TO CLEAR DB AND OLD TEMP FILES EVERY NIGHT
 cron.schedule('0 0 * * *', async () => {
     localRecords = [];
     try { await DailyRecord.deleteMany({}); } catch (e) {} 
     try { await TempSession.deleteMany({}); } catch (e) {}
+    
+    // Clear old temp images from server to save space
+    try {
+        const files = fs.readdirSync('./');
+        files.forEach(f => { if (f.startsWith('temp_') && f.endsWith('.jpg')) fs.unlinkSync(f); });
+    } catch(e){}
+
     settings.closedLobbies = [];
     saveSettings();
     seenUsers.clear();
