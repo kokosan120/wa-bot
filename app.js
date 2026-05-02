@@ -46,8 +46,6 @@ const client = new Client({
     puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'], headless: true, timeout: 60000 }
 });
 
-const botStartTime = Math.floor(Date.now() / 1000);
-
 // ─────────────────────────────────────────────────────
 //  HELPERS & STATE
 // ─────────────────────────────────────────────────────
@@ -167,6 +165,9 @@ const getStats = () => {
     };
 };
 
+// ─────────────────────────────────────────────────────
+//  🔥 ADVANCED TESSERACT OCR ENGINE 🔥
+// ─────────────────────────────────────────────────────
 let _ocrWorker = null;
 const getOCRWorker = async () => {
     if (!_ocrWorker) {
@@ -285,6 +286,9 @@ const isInvalidName = (name) => {
     return false;
 };
 
+// ─────────────────────────────────────────────────────
+//  MESSAGING HELPERS
+// ─────────────────────────────────────────────────────
 const getWelcomeMessage = () => {
     let msg = `🎮 *${settings.scrimName} — LOBBY REGISTRATION*\n⏰ *Time:* ${settings.lobbyTime}\n━━━━━━━━━━━━━━━━━━━━\n\nKonsi lobby leni hai?\n\n`;
     const isMiniFull = !isSlotsAvailable('mini');
@@ -318,7 +322,7 @@ const sendLobbyInfo = async (to, lobbyType) => {
     }
 };
 
-// 🔥 FIX 1: Send to absolute Admin ID (Message Yourself) 🔥
+// 🔥 FIX 1: MISSING sendAdminMedia function add kar diya gaya hai 🔥
 const sendAdminMedia = async (savedMedia, caption) => { 
     try { 
         const adminId = client.info.wid.user + '@c.us'; 
@@ -360,11 +364,17 @@ const processVerification = async (msg, teamName, lobbyType, paymentData) => {
 
 const getRealNumber = async (msg) => { try { const c = await msg.getContact(); if (c?.number?.length >= 10) return c.number; } catch {} return msg.from.split('@')[0]; };
 
+// ─────────────────────────────────────────────────────
+//  CLIENT EVENTS
+// ─────────────────────────────────────────────────────
 client.on('qr', qr => { qrcode.generate(qr, { small: true }); });
 client.on('ready', ()  => log('INFO', '✅ BOT READY! ADMIN PANEL FIXED.'));
 client.on('auth_failure', m => log('ERROR', `Auth failed: ${m}`));
 client.on('disconnected', reason => { log('WARN', `Disconnected: ${reason}. Reinitializing in 5s...`); setTimeout(() => client.initialize(), 5000); });
 
+// ─────────────────────────────────────────────────────
+//  MESSAGE HANDLER
+// ─────────────────────────────────────────────────────
 client.on('message_create', async msg => {
     try {
         const now = Math.floor(Date.now() / 1000);
@@ -376,13 +386,15 @@ client.on('message_create', async msg => {
         const textLower = rawText.toLowerCase();
         const cmd       = textLower.split(/\s+/)[0];
         
-        // 🔥 Admin Setup
         const adminId = client.info.wid.user + '@c.us';
         const isAdmin = msg.fromMe || msg.from === adminId || msg.from === client.info.wid._serialized;
 
         if (msg.isStatus) return;
         if (msg.fromMe && !rawText.startsWith('.') && !['ok', 'ban'].includes(textLower)) return;
 
+        // ══════════════════════════════════════════
+        //  ADMIN COMMANDS
+        // ══════════════════════════════════════════
         if (isAdmin) {
             const replyAdmin = (text) => client.sendMessage(msg.from, text);
             
@@ -569,12 +581,11 @@ client.on('message_create', async msg => {
             }
         }
 
-        // 🔥 FIX 2: Store raw base64 data to prevent it from getting deleted while waiting for Team Name
+        // 🔥 FIX 2: Missing Media logic fixed, savedMedia ban raha hai 🔥
         if (msg.hasMedia && msg.type === 'image') {
             clearQrReminder(msg.from);
             const media = await msg.downloadMedia();
             
-            // Raw data save kiya taki library delete na kar paye
             const savedMedia = { mimetype: media.mimetype, data: media.data, filename: media.filename || 'image.jpg' };
             const imgHash = crypto.createHash('md5').update(media.data).digest('hex');
             
@@ -655,5 +666,16 @@ client.on('message_create', async msg => {
 
     } catch (e) { log('ERROR', `Handler error: ${e.message}`); }
 });
+
+// 🔥 FIX 3: Midnight Cron add kar diya gaya hai 🔥
+cron.schedule('0 0 * * *', async () => {
+    localRecords = [];
+    try { await DailyRecord.deleteMany({}); } catch (e) {} 
+    settings.closedLobbies = [];
+    saveSettings();
+    seenUsers.clear();
+    completedUsers.clear();
+    console.log('🧹 Daily reset completed.');
+}, { timezone: 'Asia/Kolkata' });
 
 client.initialize();
