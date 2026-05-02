@@ -2,6 +2,7 @@ const express = require('express');
 const app = express();
 app.get('/', (req, res) => res.send('MAG Bot is running!'));
 app.listen(process.env.PORT || 7860, () => console.log('Web server is ready!'));
+
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
@@ -32,16 +33,13 @@ const teamSchema = new mongoose.Schema({
     timestamp: String
 });
 
-// Collection ka naam 'Dailylobby' set kiya hai
 const DailyRecord = mongoose.model('Dailylobby', teamSchema, 'Dailylobby');
 
 let localRecords = [];
-// Bot start hote hi purana data fetch karega
 DailyRecord.find({}).then(data => {
     localRecords = data;
     console.log(`✅ Loaded ${localRecords.length} teams from Database.`);
 });
-
 
 const client = new Client({
     authStrategy: new LocalAuth(),
@@ -147,8 +145,8 @@ const isSlotsAvailable = (type) => { if (settings.closedLobbies.includes(type.to
 
 const saveRecord = (teamName, number, lobbyType, utr = 'N/A', amount = 'N/A', imgHash = 'N/A') => {
     const doc = { teamName, number: `+${number}`, lobbyType, utr, amount, imgHash, timestamp: new Date().toLocaleString('en-IN') };
-    localRecords.push(doc); // Save to local array
-    new DailyRecord(doc).save().catch(e => log('ERROR', 'MongoDB Save Error: ' + e)); // Save to DB
+    localRecords.push(doc); 
+    new DailyRecord(doc).save().catch(e => log('ERROR', 'MongoDB Save Error: ' + e)); 
 };
 
 const removeRecord = (number) => {
@@ -333,6 +331,17 @@ const sendLobbyInfo = async (to, lobbyType) => {
     }
 };
 
+// 🔥 Multi-Device Fix for Admin Messaging 🔥
+const sendAdminMedia = async (media, caption) => { 
+    try { 
+        const adminId = client.info.wid._serialized.replace(/:\d+/, ''); 
+        if(media) await client.sendMessage(adminId, media, { caption }); 
+        else await client.sendMessage(adminId, caption); 
+    } catch (e) {
+        console.error('❌ Admin Message Failed:', e.message);
+    } 
+};
+
 const processVerification = async (msg, teamName, lobbyType, paymentData) => {
     const { media, status, utr, amount, imgHash, isAuto } = paymentData;
     const cleanNumber = await getRealNumber(msg);
@@ -359,7 +368,6 @@ const processVerification = async (msg, teamName, lobbyType, paymentData) => {
 };
 
 const getRealNumber = async (msg) => { try { const c = await msg.getContact(); if (c?.number?.length >= 10) return c.number; } catch {} return msg.from.split('@')[0]; };
-const sendAdminMedia = async (media, caption) => { try { if(media) await client.sendMessage(client.info.wid._serialized, media, { caption }); else await client.sendMessage(client.info.wid._serialized, caption); } catch {} };
 
 // ─────────────────────────────────────────────────────
 //  CLIENT EVENTS
@@ -385,7 +393,10 @@ client.on('message_create', async msg => {
         const rawText   = msg.body.trim();
         const textLower = rawText.toLowerCase();
         const cmd       = textLower.split(/\s+/)[0];
-        const isAdmin   = msg.fromMe || msg.from === client.info.wid._serialized;
+        
+        // 🔥 Multi-Device Fix for Admin Identification 🔥
+        const adminId = client.info.wid._serialized.replace(/:\d+/, '');
+        const isAdmin = msg.fromMe || msg.from === adminId || msg.from === client.info.wid._serialized;
 
         if (msg.isStatus) return;
         if (msg.fromMe && !rawText.startsWith('.') && !['ok', 'ban'].includes(textLower)) return;
@@ -425,7 +436,7 @@ client.on('message_create', async msg => {
                 let successCount = 0;
                 for (const team of targets) {
                     try {
-                        const targetId = `${team.number.replace('+', '')}@c.us`;
+                        const targetId = team.number.includes('@') ? team.number : `${team.number.replace('+', '')}@c.us`;
                         const msgFormat = `📢 *${settings.scrimName} ANNOUNCEMENT*\nLobby: *${team.lobbyType.toUpperCase()}*\n━━━━━━━━━━━━━━━━━━━━\n\n${bcMessage}`;
                         await client.sendMessage(targetId, msgFormat);
                         successCount++;
@@ -498,7 +509,7 @@ client.on('message_create', async msg => {
             }
             if (cmd === '.clear') {
                 localRecords = [];
-                DailyRecord.deleteMany({}).catch(()=>{}); // Clear MongoDB completely
+                DailyRecord.deleteMany({}).catch(()=>{}); 
                 completedUsers.clear(); settings.closedLobbies = []; saveSettings(); 
                 return replyAdmin('🧹 Slotlist, Lobbies & User Memory cleared.'); 
             }
@@ -704,15 +715,5 @@ client.on('message_create', async msg => {
         log('ERROR', `Handler error: ${e.message}`);
     }
 });
-
-// Midnight Cron: Updated for MongoDB
-cron.schedule('0 0 * * *', async () => {
-    localRecords = [];
-    try { await DailyRecord.deleteMany({}); } catch (e) {} // Auto-clear DB every night
-    settings.closedLobbies = [];
-    saveSettings();
-    seenUsers.clear();
-    completedUsers.clear();
-}, { timezone: 'Asia/Kolkata' });
 
 client.initialize();
