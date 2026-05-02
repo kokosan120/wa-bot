@@ -120,6 +120,10 @@ const touchSession = (userId) => {
     if (sessionTimeout[userId]) clearTimeout(sessionTimeout[userId]);
     sessionTimeout[userId] = setTimeout(async () => {
         if (pendingPayments[userId]) {
+            // Delete temp file if exists
+            if (pendingPayments[userId].mediaPath) {
+                try { fs.unlinkSync(pendingPayments[userId].mediaPath); } catch(e){}
+            }
             delete pendingPayments[userId];
             try { await client.sendMessage(userId, '⌛ *Session timeout ho gayi.*\nDobara screenshot bhejo to restart karo.'); } catch {}
         }
@@ -128,6 +132,9 @@ const touchSession = (userId) => {
 
 const clearSession = (userId) => {
     if (sessionTimeout[userId]) clearTimeout(sessionTimeout[userId]);
+    if (pendingPayments[userId] && pendingPayments[userId].mediaPath) {
+        try { fs.unlinkSync(pendingPayments[userId].mediaPath); } catch(e){}
+    }
     delete sessionTimeout[userId]; delete pendingPayments[userId];
 };
 
@@ -138,7 +145,6 @@ const isSlotsAvailable = (type) => { if (settings.closedLobbies.includes(type.to
 const saveRecord = (teamName, number, lobbyType, utr = 'N/A', amount = 'N/A', imgHash = 'N/A') => {
     const istTimestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
     const doc = { teamName, number: `+${number}`, lobbyType, utr, amount, imgHash, timestamp: istTimestamp };
-    
     localRecords.push(doc); 
     new DailyRecord(doc).save().catch(e => log('ERROR', 'MongoDB Save Error: ' + e)); 
 };
@@ -165,9 +171,6 @@ const getStats = () => {
     };
 };
 
-// ─────────────────────────────────────────────────────
-//  🔥 ADVANCED TESSERACT OCR ENGINE 🔥
-// ─────────────────────────────────────────────────────
 let _ocrWorker = null;
 const getOCRWorker = async () => {
     if (!_ocrWorker) {
@@ -267,9 +270,7 @@ const analyzeOCR = (rawText, utr, amount) => {
     const isSuccess = /success|succes|paid|pald|completed|complet|approved|received|payment\s*done/i.test(t);
 
     if (isSuccess && dateStatus === 'TODAY' && !!amount) {
-        if (utr && !isValidUPI_UTR(utr)) {
-            return { status: '❌ FAKE APP DETECTED (Invalid UTR Year)', isAuto: false };
-        }
+        if (utr && !isValidUPI_UTR(utr)) { return { status: '❌ FAKE APP DETECTED (Invalid UTR Year)', isAuto: false }; }
         if (!toMag) return { status: '🚨 WRONG PAYEE (MAG ESPORTS match nahi hua)', isAuto: false };
         if (!utr) return { status: '⚠️ UTR MISSING (Manual Check)', isAuto: false };
         return { status: '✅ AUTO-VERIFIED', isAuto: true };
@@ -286,9 +287,6 @@ const isInvalidName = (name) => {
     return false;
 };
 
-// ─────────────────────────────────────────────────────
-//  MESSAGING HELPERS
-// ─────────────────────────────────────────────────────
 const getWelcomeMessage = () => {
     let msg = `🎮 *${settings.scrimName} — LOBBY REGISTRATION*\n⏰ *Time:* ${settings.lobbyTime}\n━━━━━━━━━━━━━━━━━━━━\n\nKonsi lobby leni hai?\n\n`;
     const isMiniFull = !isSlotsAvailable('mini');
@@ -322,13 +320,15 @@ const sendLobbyInfo = async (to, lobbyType) => {
     }
 };
 
-// 🔥 FIX 1: MISSING sendAdminMedia function add kar diya gaya hai 🔥
-const sendAdminMedia = async (savedMedia, caption) => { 
+// 🔥 FILE BASED FIX FOR 'RELEASED' CRASH 🔥
+const sendAdminMedia = async (mediaPath, caption) => { 
     try { 
         const adminId = client.info.wid.user + '@c.us'; 
-        if (savedMedia && savedMedia.data) {
-            const imgToSend = new MessageMedia(savedMedia.mimetype, savedMedia.data, savedMedia.filename);
+        if (mediaPath && fs.existsSync(mediaPath)) {
+            const imgToSend = MessageMedia.fromFilePath(mediaPath);
             await client.sendMessage(adminId, imgToSend, { caption }); 
+            // Cleanup temp file after 5 seconds
+            setTimeout(() => { try { fs.unlinkSync(mediaPath); } catch(e){} }, 5000);
         } else {
             await client.sendMessage(adminId, caption); 
         }
@@ -338,7 +338,7 @@ const sendAdminMedia = async (savedMedia, caption) => {
 };
 
 const processVerification = async (msg, teamName, lobbyType, paymentData) => {
-    const { media, status, utr, amount, imgHash, isAuto } = paymentData;
+    const { mediaPath, status, utr, amount, imgHash, isAuto } = paymentData;
     const cleanNumber = await getRealNumber(msg);
     const rawId       = msg.from;
 
@@ -350,31 +350,25 @@ const processVerification = async (msg, teamName, lobbyType, paymentData) => {
 
     if (isAuto || status === '✅ AUTO-VERIFIED') {
         if (isDuplicateUTR(utr)) {
-            await sendAdminMedia(media, `⚠️ DUPLICATE UTR BLOCKED!\n${adminDetails}\n\nReply *ok* to force approve or *ban* to deny.`);
+            await sendAdminMedia(mediaPath, `⚠️ DUPLICATE UTR BLOCKED!\n${adminDetails}\n\nReply *ok* to force approve or *ban* to deny.`);
             return client.sendMessage(msg.from, "⚠️ Ye payment already register ho chuki hai. Admin check karega.");
         }
         saveRecord(teamName, cleanNumber, lobbyType, utr || 'N/A', amount || 'N/A', imgHash);
         await client.sendMessage(msg.from, `✅ *PAYMENT VERIFIED!*\nTeam: *${teamName}*\nLobby: *${lobbyType}*\n━━━━━━━━━━━━━━━━━━━━\n🔗 Group join karo 👇\n${link}`);
-        await sendAdminMedia(media, `✅ AUTO-VERIFIED\n${adminDetails}\n\nReply *ban* to revoke.`);
+        await sendAdminMedia(mediaPath, `✅ AUTO-VERIFIED\n${adminDetails}\n\nReply *ban* to revoke.`);
     } else {
-        await sendAdminMedia(media, `🚨 MANUAL CHECK REQUIRED\n${adminDetails}\nStatus: ${status}\n\nReply *ok* to approve or *ban* to deny.`);
+        await sendAdminMedia(mediaPath, `🚨 MANUAL CHECK REQUIRED\n${adminDetails}\nStatus: ${status}\n\nReply *ok* to approve or *ban* to deny.`);
         await client.sendMessage(msg.from, `⏳ *Payment manual check pe gaya.*\nAdmin verify karega. Thoda wait karo. 🙏`);
     }
 };
 
 const getRealNumber = async (msg) => { try { const c = await msg.getContact(); if (c?.number?.length >= 10) return c.number; } catch {} return msg.from.split('@')[0]; };
 
-// ─────────────────────────────────────────────────────
-//  CLIENT EVENTS
-// ─────────────────────────────────────────────────────
 client.on('qr', qr => { qrcode.generate(qr, { small: true }); });
-client.on('ready', ()  => log('INFO', '✅ BOT READY! ADMIN PANEL FIXED.'));
+client.on('ready', ()  => log('INFO', '✅ BOT READY! ADVANCED OCR & ADMIN PANEL FIXED.'));
 client.on('auth_failure', m => log('ERROR', `Auth failed: ${m}`));
 client.on('disconnected', reason => { log('WARN', `Disconnected: ${reason}. Reinitializing in 5s...`); setTimeout(() => client.initialize(), 5000); });
 
-// ─────────────────────────────────────────────────────
-//  MESSAGE HANDLER
-// ─────────────────────────────────────────────────────
 client.on('message_create', async msg => {
     try {
         const now = Math.floor(Date.now() / 1000);
@@ -392,9 +386,6 @@ client.on('message_create', async msg => {
         if (msg.isStatus) return;
         if (msg.fromMe && !rawText.startsWith('.') && !['ok', 'ban'].includes(textLower)) return;
 
-        // ══════════════════════════════════════════
-        //  ADMIN COMMANDS
-        // ══════════════════════════════════════════
         if (isAdmin) {
             const replyAdmin = (text) => client.sendMessage(msg.from, text);
             
@@ -403,38 +394,27 @@ client.on('message_create', async msg => {
                 const targetLobby = parts[1]?.toLowerCase();
                 const bcMessage = parts.slice(2).join(' ');
 
-                if (!targetLobby || !bcMessage) {
-                    return replyAdmin('⚠️ Usage: .bc <mini/mega/live/all> <Your Message>');
-                }
+                if (!targetLobby || !bcMessage) { return replyAdmin('⚠️ Usage: .bc <mini/mega/live/all> <Your Message>'); }
 
                 const records = readRecords();
                 let targets = [];
 
-                if (targetLobby === 'all') {
-                    targets = records;
-                } else if (['mini', 'mega', 'live'].includes(targetLobby)) {
-                    targets = records.filter(r => r.lobbyType?.toLowerCase() === targetLobby);
-                } else {
-                    return replyAdmin('⚠️ Invalid lobby. Use mini, mega, live, or all.');
-                }
+                if (targetLobby === 'all') { targets = records; } 
+                else if (['mini', 'mega', 'live'].includes(targetLobby)) { targets = records.filter(r => r.lobbyType?.toLowerCase() === targetLobby); } 
+                else { return replyAdmin('⚠️ Invalid lobby. Use mini, mega, live, or all.'); }
 
-                if (targets.length === 0) {
-                    return replyAdmin(`⚠️ Koi team ${targetLobby.toUpperCase()} lobby me register nahi hai.`);
-                }
+                if (targets.length === 0) { return replyAdmin(`⚠️ Koi team ${targetLobby.toUpperCase()} lobby me register nahi hai.`); }
 
                 await replyAdmin(`⏳ Broadcasting message to ${targets.length} teams...`);
-                
                 let successCount = 0;
                 for (const team of targets) {
                     try {
                         const targetId = `${team.number.replace('+', '')}@c.us`;
                         const msgFormat = `📢 *${settings.scrimName} ANNOUNCEMENT*\nLobby: *${team.lobbyType.toUpperCase()}*\n━━━━━━━━━━━━━━━━━━━━\n\n${bcMessage}`;
                         await client.sendMessage(targetId, msgFormat);
-                        successCount++;
-                        await new Promise(res => setTimeout(res, 500)); 
+                        successCount++; await new Promise(res => setTimeout(res, 500)); 
                     } catch (e) {}
                 }
-                
                 return replyAdmin(`✅ Broadcast successfully sent to ${successCount}/${targets.length} teams.`);
             }
 
@@ -581,12 +561,14 @@ client.on('message_create', async msg => {
             }
         }
 
-        // 🔥 FIX 2: Missing Media logic fixed, savedMedia ban raha hai 🔥
+        // 🔥 TEMP FILE LOGIC 🔥
         if (msg.hasMedia && msg.type === 'image') {
             clearQrReminder(msg.from);
             const media = await msg.downloadMedia();
             
-            const savedMedia = { mimetype: media.mimetype, data: media.data, filename: media.filename || 'image.jpg' };
+            // Save to disk to bypass memory clear bug
+            const tempFileName = `./temp_${msg.from.split('@')[0]}.jpg`;
+            fs.writeFileSync(tempFileName, media.data, 'base64');
             const imgHash = crypto.createHash('md5').update(media.data).digest('hex');
             
             if (isDuplicateHash(imgHash)) return client.sendMessage(msg.from, "⚠️ Bhai ye screenshot pehle hi kisi dusri team ne register kar liya hai! Ek photo do baar use nahi ho sakti. 🚫");
@@ -614,11 +596,11 @@ client.on('message_create', async msg => {
                 if (!detectedLobby && !['all', 'both', 'minilive'].includes(activeMode)) detectedLobby = activeMode.charAt(0).toUpperCase() + activeMode.slice(1);
 
                 if (detectedLobby) {
-                    pendingPayments[msg.from] = { media: savedMedia, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_TEAM_NAME', lobbyType: detectedLobby };
+                    pendingPayments[msg.from] = { mediaPath: tempFileName, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_TEAM_NAME', lobbyType: detectedLobby };
                     touchSession(msg.from);
                     return client.sendMessage(msg.from, `✅ Screenshot mila! (₹${amount || '?'})\nLobby: *${detectedLobby}*\n\n👉 Verification ke liye apna *Team Name* bhejo:`);
                 } else {
-                    pendingPayments[msg.from] = { media: savedMedia, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_LOBBY', lobbyType: null };
+                    pendingPayments[msg.from] = { mediaPath: tempFileName, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_LOBBY', lobbyType: null };
                     touchSession(msg.from);
                     let askMsg = `✅ Screenshot receive ho gaya!\nKaunsi lobby leni hai?\n👉 `;
                     if (activeMode === 'all') askMsg += `Type: *Mini*, *Mega* ya *Live*`;
@@ -629,7 +611,8 @@ client.on('message_create', async msg => {
                 }
             } catch (e) {
                 await resetOCRWorker();
-                pendingPayments[msg.from] = { media: null, status: '❌ OCR SCAN FAILED', state: 'AWAITING_LOBBY' }; touchSession(msg.from);
+                pendingPayments[msg.from] = { mediaPath: null, status: '❌ OCR SCAN FAILED', state: 'AWAITING_LOBBY' }; touchSession(msg.from);
+                try { fs.unlinkSync(tempFileName); } catch(err){}
                 return client.sendMessage(msg.from, `⚠️ Screenshot scan me error aayi. Please lobby select karein.`);
             }
         }
@@ -667,7 +650,6 @@ client.on('message_create', async msg => {
     } catch (e) { log('ERROR', `Handler error: ${e.message}`); }
 });
 
-// 🔥 FIX 3: Midnight Cron add kar diya gaya hai 🔥
 cron.schedule('0 0 * * *', async () => {
     localRecords = [];
     try { await DailyRecord.deleteMany({}); } catch (e) {} 
