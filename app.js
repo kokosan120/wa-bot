@@ -60,9 +60,10 @@ const safeWrite = (file, data) => {
     catch(e) { console.error(`❌ Write error [${file}]:`, e.message); }
 };
 
+// 🔥 FIX: Timezone for Logs 🔥
 const LOG_FILE = './bot.log';
 const log = (level, msg) => {
-    const entry = `[${new Date().toLocaleString('en-IN')}] [${level}] ${msg}`;
+    const entry = `[${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}] [${level}] ${msg}`;
     console.log(entry);
     try { fs.appendFileSync(LOG_FILE, entry + '\n'); } catch {}
 };
@@ -144,7 +145,10 @@ const getSlotCount     = (type) => readRecords().filter(r => r.lobbyType?.toLowe
 const isSlotsAvailable = (type) => { if (settings.closedLobbies.includes(type.toLowerCase())) return false; return getSlotCount(type) < maxSlots; };
 
 const saveRecord = (teamName, number, lobbyType, utr = 'N/A', amount = 'N/A', imgHash = 'N/A') => {
-    const doc = { teamName, number: `+${number}`, lobbyType, utr, amount, imgHash, timestamp: new Date().toLocaleString('en-IN') };
+    // 🔥 FIX: Timezone for Database 🔥
+    const istTimestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    const doc = { teamName, number: `+${number}`, lobbyType, utr, amount, imgHash, timestamp: istTimestamp };
+    
     localRecords.push(doc); 
     new DailyRecord(doc).save().catch(e => log('ERROR', 'MongoDB Save Error: ' + e)); 
 };
@@ -189,7 +193,9 @@ const getOCRWorker = async () => {
 const resetOCRWorker = async () => { try { if (_ocrWorker) await _ocrWorker.terminate(); } catch {} _ocrWorker = null; };
 
 const checkDateStatus = (lowerText) => {
-    const now = new Date();
+    // 🔥 FIX: Date checking logic now relies on IST timezone 🔥
+    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    
     const formatD = (d) => {
         const day = d.getDate(); const dayPad = String(day).padStart(2, '0');
         const mon = d.toLocaleString('en-US', { month: 'short' }).toLowerCase();
@@ -331,12 +337,17 @@ const sendLobbyInfo = async (to, lobbyType) => {
     }
 };
 
-// 🔥 Multi-Device Fix for Admin Messaging 🔥
+// 🔥 FIX: Multi-Device Fix + "Released" Memory Bug Fix 🔥
 const sendAdminMedia = async (media, caption) => { 
     try { 
         const adminId = client.info.wid._serialized.replace(/:\d+/, ''); 
-        if(media) await client.sendMessage(adminId, media, { caption }); 
-        else await client.sendMessage(adminId, caption); 
+        if (media) {
+            // Re-instantiate media object to fix the "released" bug
+            const safeMedia = new MessageMedia(media.mimetype, media.data, media.filename);
+            await client.sendMessage(adminId, safeMedia, { caption }); 
+        } else {
+            await client.sendMessage(adminId, caption); 
+        }
     } catch (e) {
         console.error('❌ Admin Message Failed:', e.message);
     } 
@@ -373,7 +384,6 @@ const getRealNumber = async (msg) => { try { const c = await msg.getContact(); i
 //  CLIENT EVENTS
 // ─────────────────────────────────────────────────────
 client.on('qr', qr => {
-    console.log("RAW_QR_TEXT:", qr);
     qrcode.generate(qr, { small: true });
 });
 client.on('ready', ()  => log('INFO', '✅ BOT READY! ADVANCED OFFLINE TESSERACT ACTIVE.'));
@@ -394,7 +404,6 @@ client.on('message_create', async msg => {
         const textLower = rawText.toLowerCase();
         const cmd       = textLower.split(/\s+/)[0];
         
-        // 🔥 Multi-Device Fix for Admin Identification 🔥
         const adminId = client.info.wid._serialized.replace(/:\d+/, '');
         const isAdmin = msg.fromMe || msg.from === adminId || msg.from === client.info.wid._serialized;
 
@@ -436,7 +445,7 @@ client.on('message_create', async msg => {
                 let successCount = 0;
                 for (const team of targets) {
                     try {
-                        const targetId = team.number.includes('@') ? team.number : `${team.number.replace('+', '')}@c.us`;
+                        const targetId = `${team.number.replace('+', '')}@c.us`;
                         const msgFormat = `📢 *${settings.scrimName} ANNOUNCEMENT*\nLobby: *${team.lobbyType.toUpperCase()}*\n━━━━━━━━━━━━━━━━━━━━\n\n${bcMessage}`;
                         await client.sendMessage(targetId, msgFormat);
                         successCount++;
