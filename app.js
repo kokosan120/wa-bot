@@ -137,7 +137,7 @@ let settings = safeRead('./settings.json', {
 if (!settings.closedLobbies) settings.closedLobbies = [];
 const saveSettings = () => safeWrite('./settings.json', settings);
 
-const MAG_UPI_IDS = ['8823827920@okbizaxis', '8823827920', 'mag esports', 'magesports', 'mag_esports', 'mac esports', 'maq esports', '882382792o', 'chetan bhul', 'chetan'];
+const MAG_UPI_IDS = ['8823827920@okbizaxis', '8823827920', 'mag esports', 'magesports', 'mag_esports', 'mac esports', 'maq esports', '882382792o', 'chetan bhul', 'chetan', 'ashish kr ray', 'ashish', 'esportsasfornow', 'esportsasfornow@jio', 'esportsasfornow@okbizaxis'];
 const OCR_MIN_CONF = 30;
 
 const getValidPrices = () => `${settings.miniPrice} ${settings.megaPrice} ${settings.mediumPrice} ${settings.competitivePrice} ${settings.livePrice}`.match(/\d+/g) || [];
@@ -184,7 +184,7 @@ const removeRecord = (number) => {
     DailyRecord.deleteMany({ $or: [{ number: numStr }, { number: number }] }).catch(e => log('ERROR', 'DB Del Error: ' + e));
 };
 
-const isDuplicateUTR   = (utr)  => { if (!utr || utr === 'N/A') return false; return readRecords().some(r => r.utr === utr); };
+const isDuplicateUTR   = (utr)  => { if (!utr || utr === 'N/A' || utr === 'WA-PAY') return false; return readRecords().some(r => r.utr === utr); };
 const isDuplicateHash  = (hash) => { if (!hash || hash === 'N/A') return false; return readRecords().some(r => r.imgHash === hash); };
 const isDuplicateTeam  = (teamName, lobbyType) => readRecords().some(r => r.lobbyType?.toLowerCase() === lobbyType.toLowerCase() && r.teamName.toLowerCase().trim() === teamName.toLowerCase().trim());
 
@@ -266,11 +266,17 @@ const analyzeOCR = (rawText, utr, amount) => {
     const toMag = MAG_UPI_IDS.some(id => t.includes(id));
     const dateStatus = checkDateStatus(t);
     if (dateStatus === 'OLD') return { status: '❌ FAKE/OLD DATE', isAuto: false };
+
     const isSuccess = /success|succes|paid|pald|completed|complet|approved|received|payment\s*done/i.test(t);
-    if (isSuccess && dateStatus === 'TODAY' && !!amount) {
+    // WhatsApp Pay detection — "Sent to Ashish Kr Ray" style
+    const isWaPay = /ashish\s*kr\s*ray|esportsasfornow|whatsapp\s*pay/i.test(t);
+
+    if (isSuccess && !!amount) {
         if (utr && !isValidUPI_UTR(utr)) return { status: '❌ FAKE APP DETECTED (Invalid UTR Year)', isAuto: false };
-        if (!toMag) return { status: '🚨 WRONG PAYEE', isAuto: false };
-        if (!utr) return { status: '⚠️ UTR MISSING (Manual Check)', isAuto: false };
+        // WA Pay screenshots: payee shown differently, skip toMag check
+        if (!toMag && !isWaPay) return { status: '🚨 WRONG PAYEE', isAuto: false };
+        // WA Pay has no UTR — that's fine
+        if (!utr && !isWaPay) return { status: '⚠️ UTR MISSING (Manual Check)', isAuto: false };
         return { status: '✅ AUTO-VERIFIED', isAuto: true };
     }
     if (isSuccess) return { status: '⚠️ PARTIAL MATCH', isAuto: false };
@@ -279,7 +285,12 @@ const analyzeOCR = (rawText, utr, amount) => {
 
 const isInvalidName = (name) => {
     const lower = name.toLowerCase().trim();
-    const bad   = ['ok','done','yes','ha','hmm','ho gaya','hi','hello','bhai','bro','qr','pay','payment','ss','screenshot','mera','slot','book','jaldi','please','plz','team','naam','name'];
+    const bad = ['ok','done','yes','ha','hmm','ho gaya','hi','hello','bhai','bro','qr','pay',
+                 'payment','ss','screenshot','mera','slot','book','jaldi','please','plz',
+                 'team','naam','name','yahi hai','yahi h','kar diya','send kiya','bhej diya',
+                 'paid','kr diya','ho gya'];
+    // Reject multiline messages (player lists etc.)
+    if (name.includes('\n') && name.split('\n').filter(l => l.trim()).length > 1) return true;
     if (lower.length < 2 || bad.includes(lower) || /^[\d\s\W_]+$/.test(lower) || /^(.)\1{2,}$/.test(lower)) return true;
     return false;
 };
@@ -309,10 +320,10 @@ const sendLobbyInfo = async (to, lobbyType) => {
         await safeSend(to, MessageMedia.fromFilePath('./mega.png'));
     }
 
-    await safeSend(to, `🔹 *${lobbyType.toUpperCase()} LOBBY*\n⏰ *Time:* ${settings.lobbyTime}\n━━━━━━━━━━━━━━━━━━━━\n💰 Entry Fee  : *₹${price}*\n━━━━━━━━━━━━━━━━━━━━\n👇 QR scan karke *₹${price}* pay karo aur screenshot bhejo.`);
+    await safeSend(to, `🔹 *${lobbyType.toUpperCase()} LOBBY*\n⏰ *Time:* ${settings.lobbyTime}\n━━━━━━━━━━━━━━━━━━━━\n💰 Entry Fee  : *₹${price}*\n━━━━━━━━━━━━━━━━━━━━\n👇 Neeche QR scan karke *₹${price}* pay karo.\n\n⚡ *WhatsApp Pay se karo = INSTANT verify!*\n📸 UPI app (GPay/PhonePe/Paytm) se karo = Screenshot bhejo`);
 
     if (fs.existsSync('./qr.png')) {
-        await safeSend(to, MessageMedia.fromFilePath('./qr.png'), { caption: `📲 Scan & Pay *₹${price}* → Screenshot bhejo` });
+        await safeSend(to, MessageMedia.fromFilePath('./qr.png'), { caption: `📲 *Scan & Pay ₹${price}*\n\n⚡ *WhatsApp Pay* → Turant verify!\n📸 *GPay/PhonePe/Paytm* → Screenshot bhejo` });
         setQrReminder(to);
     }
 };
@@ -535,6 +546,12 @@ const handleUserMessage = async (msg, rawText, textLower) => {
         const pData = await TempSession.findOne({ phone: msg.from });
         const isWaitingText = (pData?.state === 'AWAITING_LOBBY' || pData?.state === 'AWAITING_TEAM_NAME');
 
+        // ── Handle "Done" / confirmation texts sent before/instead of WA Pay message ──
+        const isDoneConfirm = /^(done|ho gaya|paid|kar diya|bhej diya|diya|send kiya|kr diya|ho gya)$/i.test(rawText.trim());
+        if (isDoneConfirm && !pData && msg.type !== 'payment') {
+            return safeSend(msg.from, `⏳ Payment check ho raha hai...\nAgar WhatsApp Pay se kiya hai to 2-3 seconds mein auto-verify ho jayega.\nAgar UPI app se kiya hai to screenshot bhejo 📸`);
+        }
+
         let detectedLobbyIntent = null;
         for (const type of LOBBY_TYPES) {
             const prices = (String(settings[`${type}Price`]).match(/\d+/g) || []);
@@ -546,12 +563,12 @@ const handleUserMessage = async (msg, rawText, textLower) => {
         const asksQR = /qr|scan|pay|upi|kese|kaise|bhejo|number|send|bar code|scanner|gpay|paytm|phonepe/i.test(textLower);
         const hasDirectIntent = !!detectedLobbyIntent || asksQR;
 
-        if (!seenUsers.has(msg.from) && !msg.hasMedia) {
+        if (!seenUsers.has(msg.from) && !msg.hasMedia && !['payment','interactive','order'].includes(msg.type)) {
             seenUsers.add(msg.from);
             if (!isWaitingText && !hasDirectIntent) return safeSend(msg.from, getWelcomeMessage());
         }
 
-        if (pData && !msg.hasMedia) {
+        if (pData && !msg.hasMedia && !['payment','interactive','order'].includes(msg.type)) {
             if (pData.state === 'AWAITING_LOBBY') {
                 const foundType = LOBBY_TYPES.find(t => textLower.includes(t));
                 if (!foundType || !activeMode.includes(foundType)) return safeSend(msg.from, `⚠️ Sahi active lobby select karo.`);
@@ -569,6 +586,32 @@ const handleUserMessage = async (msg, rawText, textLower) => {
                 await processVerification(msg, rawText, pData.lobbyType, pData);
                 await clearSession(msg.from);
                 return;
+            }
+        }
+
+        // ── WHATSAPP NATIVE PAY (payment / interactive / order) ──
+        if (['payment', 'interactive', 'order'].includes(msg.type)) {
+            clearQrReminder(msg.from);
+            log('INFO', `WA Pay received from ${msg.from} | type: ${msg.type}`);
+
+            let detectedLobby = pData?.lobbyType || null;
+            if (!detectedLobby && activeMode.length === 1)
+                detectedLobby = activeMode[0].charAt(0).toUpperCase() + activeMode[0].slice(1);
+
+            if (detectedLobby) {
+                await saveSession(msg.from, {
+                    mediaPath: null, status: '✅ AUTO-VERIFIED', isAuto: true,
+                    utr: 'WA-PAY', amount: 'Paid', imgHash: msg.id?.id || 'WA-PAY',
+                    state: 'AWAITING_TEAM_NAME', lobbyType: detectedLobby
+                });
+                return safeSend(msg.from, `✅ *WhatsApp Payment Received!*\nLobby: *${detectedLobby}*\n\n👉 Apna *Team Name* bhejo:`);
+            } else {
+                await saveSession(msg.from, {
+                    mediaPath: null, status: '✅ AUTO-VERIFIED', isAuto: true,
+                    utr: 'WA-PAY', amount: 'Paid', imgHash: msg.id?.id || 'WA-PAY',
+                    state: 'AWAITING_LOBBY', lobbyType: null
+                });
+                return safeSend(msg.from, `✅ *WhatsApp Payment Received!*\nKaunsi lobby chahiye?\n👉 Type: *${activeMode.map(m => m.toUpperCase()).join(', ')}*`);
             }
         }
 
@@ -625,7 +668,7 @@ const handleUserMessage = async (msg, rawText, textLower) => {
             }
         }
 
-        if (!msg.hasMedia && !isWaitingText && rawText.length > 0) {
+        if (!msg.hasMedia && !isWaitingText && rawText.length > 0 && !['payment','interactive','order'].includes(msg.type)) {
             if (hasDirectIntent) {
                 if (completedUsers.has(msg.from) && !asksQR) return;
 
@@ -642,7 +685,7 @@ const handleUserMessage = async (msg, rawText, textLower) => {
                         const qrImg = MessageMedia.fromFilePath('./qr.png');
                         let captionText = `👇 *SCAN & PAY*\n⏰ *Lobby Time:* ${settings.lobbyTime}\n\n`;
                         activeMode.forEach(t => captionText += `🔹 *${t.toUpperCase()}:* ₹${settings[`${t}Price`]}\n`);
-                        captionText += `\nPay karke screenshot bhejein.`;
+                        captionText += `\n⚡ *WhatsApp Pay se karo = INSTANT verify!*\n📸 GPay/PhonePe/Paytm = Screenshot bhejo`;
                         await safeSend(msg.from, qrImg, { caption: captionText });
                         setQrReminder(msg.from);
                     }
