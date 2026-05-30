@@ -1,0 +1,5 @@
+[
+  { "id": "mini", "name": "Mini", "price": "20/25", "matches": "4", "emoji": "🟡", "link": "https://chat.whatsapp.com/xxx" },
+  { "id": "mega", "name": "Mega", "price": "35/45", "matches": "6", "emoji": "🔵", "link": "https://chat.whatsapp.com/yyy" },
+  { "id": "live", "name": "Live", "price": "55",    "matches": "6", "emoji": "🔴", "link": "https://chat.whatsapp.com/zzz" }
+]
