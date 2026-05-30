@@ -24,6 +24,73 @@ const safeWrite = (file, data) => {
 };
 
 // ─────────────────────────────────────────────────────
+//  ANTI-BAN UTILITIES
+// ─────────────────────────────────────────────────────
+const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
+
+const humanDelay = (minMs = 2000, maxMs = 6000) =>
+    new Promise(res => setTimeout(res, randInt(minMs, maxMs)));
+
+const safeSend = async (to, content, options = {}) => {
+    try {
+        // 1. Simulate reading delay
+        await humanDelay(1000, 3000);
+
+        const chat = await client.getChatById(to).catch(() => null);
+
+        if (chat) {
+            // 2. Mark account as online
+            await client.sendPresenceAvailable().catch(() => {});
+            // 3. Mark messages as read
+            await chat.sendSeen().catch(() => {});
+            // 4. Start typing indicator
+            await chat.sendStateTyping().catch(() => {});
+        }
+
+        // 5. Typing simulation delay
+        await humanDelay(2000, 5000);
+
+        if (chat) {
+            // 6. Clear typing indicator
+            await chat.clearState().catch(() => {});
+        }
+
+        // 7. Tiny pre-send gap
+        await humanDelay(500, 1500);
+
+        // 8. Send the message
+        return await client.sendMessage(to, content, options);
+
+    } catch (e) {
+        log('ERROR', `safeSend failed to ${to}: ${e.message}`);
+        return await client.sendMessage(to, content, options);
+    }
+};
+
+// ─────────────────────────────────────────────────────
+//  MESSAGE QUEUE (rate-limiting & sequential processing)
+// ─────────────────────────────────────────────────────
+const userQueues   = {};
+const processingSet = new Set();
+
+const enqueue = (userId, handlerFn) => {
+    if (!userQueues[userId]) userQueues[userId] = [];
+    userQueues[userId].push(handlerFn);
+    drainQueue(userId);
+};
+
+const drainQueue = async (userId) => {
+    if (processingSet.has(userId)) return;
+    processingSet.add(userId);
+    while (userQueues[userId] && userQueues[userId].length > 0) {
+        const fn = userQueues[userId].shift();
+        try { await fn(); } catch (e) { log('ERROR', `Queue handler error for ${userId}: ${e.message}`); }
+        await humanDelay(1000, 3000); // Delay between consecutive replies to same user
+    }
+    processingSet.delete(userId);
+};
+
+// ─────────────────────────────────────────────────────
 //  LOGGER
 // ─────────────────────────────────────────────────────
 const LOG_FILE = './bot.log';
@@ -84,11 +151,13 @@ const isRateLimited = (userId) => {
 const SESSION_TTL = 5 * 60 * 1000;
 const touchSession = (userId) => {
     if (sessionTimeout[userId]) clearTimeout(sessionTimeout[userId]);
-    sessionTimeout[userId] = setTimeout(async () => {
+    sessionTimeout[userId] = setTimeout(() => {
         if (pendingPayments[userId]) {
             delete pendingPayments[userId];
             log('INFO', `Session expired: ${userId}`);
-            try { await client.sendMessage(userId, '⌛ *Session timeout ho gayi.*\nDobara screenshot bhejo to restart karo.'); } catch {}
+            enqueue(userId, async () => {
+                await safeSend(userId, '⌛ *Session timeout ho gayi.*\nDobara screenshot bhejo to restart karo.');
+            });
         }
     }, SESSION_TTL);
 };
@@ -205,7 +274,6 @@ const isInvalidName = (name) => {
 // ─────────────────────────────────────────────────────
 const getWelcomeMessage = () => {
     let msg = `🎮 *MAG ESPORTS — LOBBY REGISTRATION*\n━━━━━━━━━━━━━━━━━━━━\n\nKonsi lobby leni hai?\n\n`;
-    
     if (activeMode.length === 0) return `🚫 *MAG ESPORTS*\nAbhi koi lobby active nahi hai. Thodi der baad try karein.`;
 
     activeMode.forEach(t => {
@@ -225,13 +293,13 @@ const sendLobbyInfo = async (to, lobbyType) => {
     const slotsLeft = maxSlots - getSlotCount(typeKey);
     const fomo      = getFomoText(slotsLeft);
 
-    await client.sendMessage(to, `🔹 *${lobbyType.toUpperCase()} LOBBY*\n━━━━━━━━━━━━━━━━━━━━\n💰 Entry Fee  : *₹${price}*\n🎟️ Status     : ${fomo}\n━━━━━━━━━━━━━━━━━━━━\n👇 QR scan karke *₹${price}* pay karo\naur payment ka screenshot bhejo.`);
+    await safeSend(to, `🔹 *${lobbyType.toUpperCase()} LOBBY*\n━━━━━━━━━━━━━━━━━━━━\n💰 Entry Fee  : *₹${price}*\n🎟️ Status     : ${fomo}\n━━━━━━━━━━━━━━━━━━━━\n👇 QR scan karke *₹${price}* pay karo\naur payment ka screenshot bhejo.`);
 
     if (fs.existsSync('./qr.png')) {
         const qrImg = MessageMedia.fromFilePath('./qr.png');
-        await client.sendMessage(to, qrImg, { caption: `📲 Scan & Pay *₹${price}* → Screenshot bhejo` });
+        await safeSend(to, qrImg, { caption: `📲 Scan & Pay *₹${price}* → Screenshot bhejo` });
     } else {
-        await client.sendMessage(to, `⚠️ QR image abhi available nahi. Admin se contact karo.`);
+        await safeSend(to, `⚠️ QR image abhi available nahi. Admin se contact karo.`);
     }
 };
 
@@ -245,18 +313,19 @@ const processVerification = async (msg, teamName, lobbyType, paymentData) => {
     if (status === '✅ AUTO-VERIFIED') {
         if (isDuplicateUTR(utr)) {
             await sendAdminMedia(media, `⚠️ DUPLICATE UTR BLOCKED!\nTeam: *${teamName}*\nLobby: *${lobbyType}*\nNumber: ${displayNum}\nID: ${rawId}\nUTR: ${utr}\n\nReply *ok* to force approve or *ban* to deny.`);
-            return msg.reply("⚠️ Payment already used lag raha hai. Admin check karega.");
+            return safeSend(rawId, "⚠️ Payment already used lag raha hai. Admin check karega.");
         }
         saveRecord(teamName, cleanNumber, lobbyType, utr || 'N/A', amount || 'N/A');
-        await msg.reply(`✅ *PAYMENT VERIFIED!*\nTeam  : *${teamName}*\nLobby : *${lobbyType}*\n━━━━━━━━━━━━━━━━━━━━\n🔗 Group join karo 👇\n${link}`);
+        await safeSend(rawId, `✅ *PAYMENT VERIFIED!*\nTeam  : *${teamName}*\nLobby : *${lobbyType}*\n━━━━━━━━━━━━━━━━━━━━\n🔗 Group join karo 👇\n${link}`);
         await sendAdminMedia(media, `✅ AUTO-VERIFIED\nTeam: *${teamName}*\nLobby: *${lobbyType}*\nNumber: ${displayNum}\nID: ${rawId}\nUTR: ${utr || 'N/A'}\n\nReply *ban* to revoke.`);
     } else {
         await sendAdminMedia(media, `🚨 MANUAL CHECK REQUIRED\nTeam: *${teamName}*\nLobby: *${lobbyType}*\nNumber: ${displayNum}\nID: ${rawId}\nStatus: ${status}\nUTR: ${utr || 'Not found'}\n\nReply *ok* to approve or *ban* to deny.`);
-        await msg.reply(`⏳ *Payment manual check pe gaya.*\nAdmin verify karega. Thoda wait karo. 🙏`);
+        await safeSend(rawId, `⏳ *Payment manual check pe gaya.*\nAdmin verify karega. Thoda wait karo. 🙏`);
     }
 };
 
 const getRealNumber = async (msg) => { try { const c = await msg.getContact(); if (c?.number?.length >= 10) return c.number; } catch {} return msg.from.split('@')[0]; };
+// Admin log messages are instant (bypasses safeSend)
 const sendAdminMedia = async (media, caption) => { try { await client.sendMessage(client.info.wid._serialized, media, { caption }); } catch {} };
 
 // ─────────────────────────────────────────────────────
@@ -278,7 +347,7 @@ client.on('message_create', async msg => {
         const isAdmin   = msg.fromMe || msg.from === '100334781354038@lid' || msg.from === client.info.wid._serialized;
 
         // ══════════════════════════════════════════
-        //  ADMIN BLOCK
+        //  ADMIN BLOCK (Instant execution, No Queue)
         // ══════════════════════════════════════════
         if (isAdmin) {
             if (cmd === '.setlink') {
@@ -324,7 +393,7 @@ client.on('message_create', async msg => {
                 } else {
                     const validTypes = args.filter(a => LOBBY_TYPES.includes(a));
                     if (validTypes.length === 0) return msg.reply(`⚠️ Invalid input. Available: ${LOBBY_TYPES.join(', ')}`);
-                    activeMode = [...new Set(validTypes)]; // remove duplicates
+                    activeMode = [...new Set(validTypes)]; 
                 }
                 saveMode(); 
                 return msg.reply(`✅ *Open Lobbies: ${activeMode.map(m => m.toUpperCase()).join(', ')}*`);
@@ -338,12 +407,16 @@ client.on('message_create', async msg => {
                     const lobbyType = (body.match(/Lobby:\s*\*?([^\n*]+)\*?/i) || [])[1]?.trim() || 'Mini';
                     if (cmd === 'ok') {
                         saveRecord(teamName, cleanNumber, lobbyType, 'N/A', 'N/A');
-                        await client.sendMessage(targetId, `✅ *VERIFIED BY ADMIN!*\nTeam: *${teamName}*\n🔗 Link: ${links[lobbyType.toLowerCase()]}`);
+                        enqueue(targetId, async () => {
+                            await safeSend(targetId, `✅ *VERIFIED BY ADMIN!*\nTeam: *${teamName}*\n🔗 Link: ${links[lobbyType.toLowerCase()]}`);
+                        });
                         return msg.reply(`✅ Approved: ${teamName}`);
                     }
                     if (cmd === 'ban') {
                         if (body.includes('AUTO-VERIFIED')) removeRecord(cleanNumber);
-                        await client.sendMessage(targetId, `🚫 *Payment Rejected!*\nSahi screenshot bhejo ya admin se contact karo.`);
+                        enqueue(targetId, async () => {
+                            await safeSend(targetId, `🚫 *Payment Rejected!*\nSahi screenshot bhejo ya admin se contact karo.`);
+                        });
                         return msg.reply(`🚫 Rejected: ${teamName}`);
                     }
                 }
@@ -353,101 +426,103 @@ client.on('message_create', async msg => {
         }
 
         // ══════════════════════════════════════════
-        //  PLAYER BLOCK
+        //  PLAYER BLOCK (Enqueued & Anti-Ban Active)
         // ══════════════════════════════════════════
-        if (!isAdmin && isRateLimited(msg.from)) return msg.reply('🚦 Bahut saare messages bhej rahe ho. Thoda ruko.');
-
-        // ── Pending States ──
-        if (pendingPayments[msg.from]?.state === 'AWAITING_LOBBY') {
-            const pData = pendingPayments[msg.from]; touchSession(msg.from);
-            
-            const foundType = LOBBY_TYPES.find(t => textLower.includes(t));
-            if (!foundType) return msg.reply(`⚠️ Lobby select karo. Available: *${activeMode.map(m => m.charAt(0).toUpperCase() + m.slice(1)).join('*, *')}*`);
-            
-            if (!activeMode.includes(foundType)) return msg.reply(`🚫 *${foundType.toUpperCase()} lobby abhi close hai.*\n👉 Open Lobbies: *${activeMode.map(m => m.toUpperCase()).join(', ')}*`);
-            
-            const lobbyType = foundType.charAt(0).toUpperCase() + foundType.slice(1);
-            if (!isSlotsAvailable(lobbyType)) { clearSession(msg.from); return msg.reply(`😔 *${lobbyType} lobby full ho gayi!*`); }
-            
-            pData.lobbyType = lobbyType; pData.state = 'AWAITING_TEAM_NAME'; touchSession(msg.from);
-            return msg.reply(`✅ *${lobbyType} Lobby* select ki!\n\nApna *Team Name* bhejo:`);
-        }
-        if (pendingPayments[msg.from]?.state === 'AWAITING_TEAM_NAME') {
-            const pData = pendingPayments[msg.from]; touchSession(msg.from);
-            if (isInvalidName(rawText)) return msg.reply('⚠️ Ek proper *Team Name* bhejo.');
-            if (!isSlotsAvailable(pData.lobbyType)) { clearSession(msg.from); return msg.reply(`🛑 *${pData.lobbyType} lobby full ho gayi!*`); }
-            clearSession(msg.from); return await processVerification(msg, rawText, pData.lobbyType, pData);
-        }
-
-        // ── Screenshot ──
-        if (msg.hasMedia) {
-            const media = await msg.downloadMedia();
-            if (!media?.mimetype?.startsWith('image/')) return msg.reply('🛑 Sirf *payment screenshot image* bhejo.');
-            await msg.reply('⏳ Screenshot check ho raha hai...');
-            try {
-                const buffer = Buffer.from(media.data, 'base64');
-                const { data: { text, confidence } } = await (await getOCRWorker()).recognize(buffer);
-                let statusObj = analyzeOCR(text, extractUTR(text), extractAmount(text));
-                if (Math.round(confidence) < OCR_MIN_CONF) statusObj.status = '⚠️ LOW IMAGE QUALITY';
-                const pData = { media, status: statusObj.status, utr: extractUTR(text), amount: extractAmount(text), state: 'AWAITING_LOBBY' };
-                
-                const anySlots = activeMode.some(t => isSlotsAvailable(t));
-                    
-                if (!anySlots) return msg.reply(`🛑 Abhi ki sabhi open lobbies full ho chuki hain!`);
-                pendingPayments[msg.from] = pData; touchSession(msg.from);
-                return msg.reply(`✅ *Screenshot receive ho gaya!*\nKaunsi lobby leni hai?\n👉 Type: *${activeMode.map(m => m.charAt(0).toUpperCase() + m.slice(1)).join('*, *')}*`);
-            } catch (e) {
-                await resetOCRWorker();
-                pendingPayments[msg.from] = { media, status: '❌ OCR FAILED', state: 'AWAITING_LOBBY' }; touchSession(msg.from);
-                return msg.reply(`⚠️ Screenshot check me error aayi.\nKaunsi lobby leni hai?\n👉 Type: *${activeMode.map(m => m.charAt(0).toUpperCase() + m.slice(1)).join('*, *')}*`);
+        enqueue(msg.from, async () => {
+            if (isRateLimited(msg.from)) {
+                return safeSend(msg.from, '🚦 Bahut saare messages bhej rahe ho. Thoda ruko.');
             }
-        }
 
-        // ── SMART KEYWORD AI ENGINE ──
-        if (!msg.hasMedia && !pendingPayments[msg.from] && rawText.length > 0) {
-            
-            const asksQR = /qr|scan|pay|upi|kese|kaise|bhejo|number|send/i.test(textLower);
-            const foundLobby = LOBBY_TYPES.find(t => 
-                textLower.includes(t) || 
-                settings[`${t}Price`].toString().split('/').some(p => textLower.includes(p.trim()))
-            );
-
-            if (foundLobby || asksQR) {
-                if (antiSpam.has(msg.from)) return;
-                antiSpam.add(msg.from); setTimeout(() => antiSpam.delete(msg.from), 4000);
-
-                let targetLobby = foundLobby ? foundLobby.toLowerCase() : null;
+            // ── Pending States ──
+            if (pendingPayments[msg.from]?.state === 'AWAITING_LOBBY') {
+                const pData = pendingPayments[msg.from]; touchSession(msg.from);
                 
-                if (!targetLobby && activeMode.length === 1) {
-                    targetLobby = activeMode[0];
-                }
+                const foundType = LOBBY_TYPES.find(t => textLower.includes(t));
+                if (!foundType) return safeSend(msg.from, `⚠️ Lobby select karo. Available: *${activeMode.map(m => m.charAt(0).toUpperCase() + m.slice(1)).join('*, *')}*`);
+                
+                if (!activeMode.includes(foundType)) return safeSend(msg.from, `🚫 *${foundType.toUpperCase()} lobby abhi close hai.*\n👉 Open Lobbies: *${activeMode.map(m => m.toUpperCase()).join(', ')}*`);
+                
+                const lobbyType = foundType.charAt(0).toUpperCase() + foundType.slice(1);
+                if (!isSlotsAvailable(lobbyType)) { clearSession(msg.from); return safeSend(msg.from, `😔 *${lobbyType} lobby full ho gayi!*`); }
+                
+                pData.lobbyType = lobbyType; pData.state = 'AWAITING_TEAM_NAME'; touchSession(msg.from);
+                return safeSend(msg.from, `✅ *${lobbyType} Lobby* select ki!\n\nApna *Team Name* bhejo:`);
+            }
+            if (pendingPayments[msg.from]?.state === 'AWAITING_TEAM_NAME') {
+                const pData = pendingPayments[msg.from]; touchSession(msg.from);
+                if (isInvalidName(rawText)) return safeSend(msg.from, '⚠️ Ek proper *Team Name* bhejo.');
+                if (!isSlotsAvailable(pData.lobbyType)) { clearSession(msg.from); return safeSend(msg.from, `🛑 *${pData.lobbyType} lobby full ho gayi!*`); }
+                clearSession(msg.from); return await processVerification(msg, rawText, pData.lobbyType, pData);
+            }
 
-                if (targetLobby) {
-                    if (!activeMode.includes(targetLobby)) return msg.reply(`🚫 *${targetLobby.toUpperCase()}* abhi close hai.\n👉 Open Lobbies: *${activeMode.map(m => m.toUpperCase()).join(', ')}*`);
-                    if (!isSlotsAvailable(targetLobby)) return msg.reply(`😔 *${targetLobby.toUpperCase()} lobby full ho gayi!*`);
-                    return await sendLobbyInfo(msg.from, targetLobby);
-                } else {
-                    if (fs.existsSync('./qr.png')) {
-                        const qrImg = MessageMedia.fromFilePath('./qr.png');
-                        let priceText = "";
-                        activeMode.forEach(t => priceText += `🔹 *${t.charAt(0).toUpperCase() + t.slice(1)}:* ₹${settings[`${t}Price`]}\n`);
-                        return client.sendMessage(msg.from, qrImg, { 
-                            caption: `👇 *SCAN & PAY*\n\n${priceText}\nPay karke screenshot bhejein.` 
-                        });
+            // ── Screenshot ──
+            if (msg.hasMedia) {
+                const media = await msg.downloadMedia();
+                if (!media?.mimetype?.startsWith('image/')) return safeSend(msg.from, '🛑 Sirf *payment screenshot image* bhejo.');
+                await safeSend(msg.from, '⏳ Screenshot check ho raha hai...');
+                try {
+                    const buffer = Buffer.from(media.data, 'base64');
+                    const { data: { text, confidence } } = await (await getOCRWorker()).recognize(buffer);
+                    let statusObj = analyzeOCR(text, extractUTR(text), extractAmount(text));
+                    if (Math.round(confidence) < OCR_MIN_CONF) statusObj.status = '⚠️ LOW IMAGE QUALITY';
+                    const pData = { media, status: statusObj.status, utr: extractUTR(text), amount: extractAmount(text), state: 'AWAITING_LOBBY' };
+                    
+                    const anySlots = activeMode.some(t => isSlotsAvailable(t));
+                        
+                    if (!anySlots) return safeSend(msg.from, `🛑 Abhi ki sabhi open lobbies full ho chuki hain!`);
+                    pendingPayments[msg.from] = pData; touchSession(msg.from);
+                    return safeSend(msg.from, `✅ *Screenshot receive ho gaya!*\nKaunsi lobby leni hai?\n👉 Type: *${activeMode.map(m => m.charAt(0).toUpperCase() + m.slice(1)).join('*, *')}*`);
+                } catch (e) {
+                    await resetOCRWorker();
+                    pendingPayments[msg.from] = { media, status: '❌ OCR FAILED', state: 'AWAITING_LOBBY' }; touchSession(msg.from);
+                    return safeSend(msg.from, `⚠️ Screenshot check me error aayi.\nKaunsi lobby leni hai?\n👉 Type: *${activeMode.map(m => m.charAt(0).toUpperCase() + m.slice(1)).join('*, *')}*`);
+                }
+            }
+
+            // ── SMART KEYWORD AI ENGINE ──
+            if (!msg.hasMedia && !pendingPayments[msg.from] && rawText.length > 0) {
+                
+                const asksQR = /qr|scan|pay|upi|kese|kaise|bhejo|number|send/i.test(textLower);
+                const foundLobby = LOBBY_TYPES.find(t => 
+                    textLower.includes(t) || 
+                    settings[`${t}Price`].toString().split('/').some(p => textLower.includes(p.trim()))
+                );
+
+                if (foundLobby || asksQR) {
+                    if (antiSpam.has(msg.from)) return;
+                    antiSpam.add(msg.from); setTimeout(() => antiSpam.delete(msg.from), 4000);
+
+                    let targetLobby = foundLobby ? foundLobby.toLowerCase() : null;
+                    
+                    if (!targetLobby && activeMode.length === 1) {
+                        targetLobby = activeMode[0];
+                    }
+
+                    if (targetLobby) {
+                        if (!activeMode.includes(targetLobby)) return safeSend(msg.from, `🚫 *${targetLobby.toUpperCase()}* abhi close hai.\n👉 Open Lobbies: *${activeMode.map(m => m.toUpperCase()).join(', ')}*`);
+                        if (!isSlotsAvailable(targetLobby)) return safeSend(msg.from, `😔 *${targetLobby.toUpperCase()} lobby full ho gayi!*`);
+                        return await sendLobbyInfo(msg.from, targetLobby);
                     } else {
-                        return msg.reply('⚠️ QR image missing.');
+                        if (fs.existsSync('./qr.png')) {
+                            const qrImg = MessageMedia.fromFilePath('./qr.png');
+                            let priceText = "";
+                            activeMode.forEach(t => priceText += `🔹 *${t.charAt(0).toUpperCase() + t.slice(1)}:* ₹${settings[`${t}Price`]}\n`);
+                            return safeSend(msg.from, `👇 *SCAN & PAY*\n\n${priceText}\nPay karke screenshot bhejein.`, { media: qrImg });
+                        } else {
+                            return safeSend(msg.from, '⚠️ QR image missing.');
+                        }
                     }
                 }
-            }
 
-            // 3. Fallback Welcome Message
-            const welcomeRegex = /\b(hi|hello|hey|menu|book|slot|slots|register|tourney|tournament|\?|help|details)\b/i;
-            if (welcomeRegex.test(textLower)) {
-                if (antiSpam.has(msg.from)) return;
-                antiSpam.add(msg.from); setTimeout(() => antiSpam.delete(msg.from), 5000);
-                return msg.reply(getWelcomeMessage());
+                // 3. Fallback Welcome Message
+                const welcomeRegex = /\b(hi|hello|hey|menu|book|slot|slots|register|tourney|tournament|\?|help|details)\b/i;
+                if (welcomeRegex.test(textLower)) {
+                    if (antiSpam.has(msg.from)) return;
+                    antiSpam.add(msg.from); setTimeout(() => antiSpam.delete(msg.from), 5000);
+                    return safeSend(msg.from, getWelcomeMessage());
+                }
             }
-        }
+        }); // End of enqueue
 
     } catch (e) {
         log('ERROR', `Handler error: ${e.message}`);
