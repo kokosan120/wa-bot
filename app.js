@@ -1,30 +1,18 @@
+const express = require('express');
+const app = report || express();
+app.get('/', (req, res) => res.send('MAG Bot is running!'));
+app.listen(process.env.PORT || 7860, () => console.log('Web server is ready!'));
+
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const Tesseract = require('tesseract.js');
-const express = require('express');
-const app = express();
-app.get('/', (req, res) => res.send('Bot is Alive!'));
-app.listen(7860, () => console.log('Dummy server running on port 7860'));
+const cron = require('node-cron');
+const crypto = require('crypto');
+const mongoose = require('mongoose');
+
 process.on('unhandledRejection', e => console.error('⚠️ Rejection:', e.message));
 process.on('uncaughtException',  e => console.error('⚠️ Exception:', e.message));
-
-const client = new Client({
-    authStrategy: new LocalAuth(),
-    puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'], headless: true, timeout: 60000 }
-});
-
-// ─────────────────────────────────────────────────────
-//  HELPERS
-// ─────────────────────────────────────────────────────
-const safeRead  = (file, fallback) => {
-    try { if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8')); } catch {}
-    return fallback;
-};
-const safeWrite = (file, data) => {
-    try { fs.writeFileSync(file, JSON.stringify(data, null, 2)); }
-    catch(e) { console.error(`❌ Write error [${file}]:`, e.message); }
-};
 
 // ─────────────────────────────────────────────────────
 //  ANTI-BAN UTILITIES
@@ -36,34 +24,19 @@ const humanDelay = (minMs = 2000, maxMs = 6000) =>
 
 const safeSend = async (to, content, options = {}) => {
     try {
-        // 1. Simulate reading delay
         await humanDelay(1000, 3000);
-
         const chat = await client.getChatById(to).catch(() => null);
 
         if (chat) {
-            // 2. Mark account as online
             await client.sendPresenceAvailable().catch(() => {});
-            // 3. Mark messages as read
             await chat.sendSeen().catch(() => {});
-            // 4. Start typing indicator
             await chat.sendStateTyping().catch(() => {});
         }
 
-        // 5. Typing simulation delay
         await humanDelay(2000, 5000);
-
-        if (chat) {
-            // 6. Clear typing indicator
-            await chat.clearState().catch(() => {});
-        }
-
-        // 7. Tiny pre-send gap
+        if (chat) await chat.clearState().catch(() => {});
         await humanDelay(500, 1500);
-
-        // 8. Send the message
         return await client.sendMessage(to, content, options);
-
     } catch (e) {
         log('ERROR', `safeSend failed to ${to}: ${e.message}`);
         return await client.sendMessage(to, content, options);
@@ -71,10 +44,10 @@ const safeSend = async (to, content, options = {}) => {
 };
 
 // ─────────────────────────────────────────────────────
-//  MESSAGE QUEUE (rate-limiting & sequential processing)
+//  MESSAGE QUEUE
 // ─────────────────────────────────────────────────────
 const userQueues   = {};
-const processingSet = new Set();
+const processingSet = new Set(); 
 
 const enqueue = (userId, handlerFn) => {
     if (!userQueues[userId]) userQueues[userId] = [];
@@ -88,29 +61,64 @@ const drainQueue = async (userId) => {
     while (userQueues[userId] && userQueues[userId].length > 0) {
         const fn = userQueues[userId].shift();
         try { await fn(); } catch (e) { log('ERROR', `Queue handler error for ${userId}: ${e.message}`); }
-        await humanDelay(1000, 3000); // Delay between consecutive replies to same user
+        await humanDelay(1000, 3000);
     }
     processingSet.delete(userId);
 };
 
 // ─────────────────────────────────────────────────────
-//  LOGGER
+//  MONGODB SETUP
 // ─────────────────────────────────────────────────────
+const MONGO_URI = 'mongodb+srv://tinyji6887_db_user:magbot123@cluster0.zu7kwc5.mongodb.net/Magbotpaid?retryWrites=true&w=majority';
+
+mongoose.connect(MONGO_URI)
+    .then(() => console.log('✅ Connected to MongoDB (Magbotpaid)!'))
+    .catch(err => console.error('❌ MongoDB Connection Error:', err));
+
+const teamSchema = new mongoose.Schema({
+    teamName: String, number: String, lobbyType: String,
+    utr: String, amount: String, imgHash: String, timestamp: String
+});
+const DailyRecord = mongoose.model('Dailylobby', teamSchema, 'Dailylobby');
+
+const sessionSchema = new mongoose.Schema({
+    phone: String, mediaPath: String, status: String,
+    isAuto: Boolean, utr: String, amount: String, imgHash: String,
+    state: String, lobbyType: String,
+    createdAt: { type: Date, default: Date.now, expires: 600 }
+});
+const TempSession = mongoose.model('TempSession', sessionSchema, 'TempSession');
+
+let localRecords = [];
+DailyRecord.find({}).then(data => {
+    localRecords = data;
+    console.log(`✅ Loaded ${localRecords.length} teams from Database.`);
+});
+
+const client = new Client({
+    authStrategy: new LocalAuth(),
+    puppeteer: { args: ['--no-sandbox', '--disable-setuid-sandbox'], headless: true, timeout: 60000 }
+});
+
+const safeRead  = (file, fallback) => { try { if (fs.existsSync(file)) return JSON.parse(fs.readFileSync(file, 'utf8')); } catch {} return fallback; };
+const safeWrite = (file, data) => { try { fs.writeFileSync(file, JSON.stringify(data, null, 2)); } catch(e) {} };
+
 const LOG_FILE = './bot.log';
 const log = (level, msg) => {
-    const entry = `[${new Date().toLocaleString('en-IN')}] [${level}] ${msg}`;
+    const entry = `[${new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' })}] [${level}] ${msg}`;
     console.log(entry);
     try { fs.appendFileSync(LOG_FILE, entry + '\n'); } catch {}
 };
 
 // ─────────────────────────────────────────────────────
-//  STATE & LOBBY CONFIG
+//  STATE & CONFIG (5 Lobbies Configured)
 // ─────────────────────────────────────────────────────
 const LOBBY_TYPES = ['mini', 'mega', 'medium', 'competitive', 'live'];
-const pendingPayments = {};
 const rateLimitMap    = {};
-const sessionTimeout  = {};
 const antiSpam        = new Set();
+const seenUsers       = new Set();
+const completedUsers  = new Set();
+const qrReminders     = {};
 let maxSlots          = 24;
 
 let activeModeData = safeRead('./mode.json', { mode: LOBBY_TYPES }).mode;
@@ -118,95 +126,74 @@ let activeMode = Array.isArray(activeModeData) ? activeModeData : (activeModeDat
 const saveMode = () => safeWrite('./mode.json', { mode: activeMode });
 
 let links = safeRead('./links.json', {
-    mini: 'https://chat.whatsapp.com/xxx',
-    mega: 'https://chat.whatsapp.com/yyy',
-    medium: 'https://chat.whatsapp.com/zzz',
-    competitive: 'https://chat.whatsapp.com/ccc',
-    live: 'https://chat.whatsapp.com/vvv'
+    mini: 'https://chat.whatsapp.com/xxx', mega: 'https://chat.whatsapp.com/yyy',
+    medium: 'https://chat.whatsapp.com/zzz', competitive: 'https://chat.whatsapp.com/ccc', live: 'https://chat.whatsapp.com/vvv'
 });
 const saveLinks = () => safeWrite('./links.json', links);
 
 let settings = safeRead('./settings.json', { 
-    miniPrice: '25', megaPrice: '30', mediumPrice: '40', competitivePrice: '50', livePrice: '60' 
+    scrimName: 'MAG ESPORTS', miniPrice: '20/25', megaPrice: '35/45', mediumPrice: '40', competitivePrice: '50', livePrice: '55', 
+    lobbyTime: '9 PM', closedLobbies: [] 
 });
+if (!settings.closedLobbies) settings.closedLobbies = [];
 const saveSettings = () => safeWrite('./settings.json', settings);
 
-const MAG_UPI_IDS     = ['8823827920@okbizaxis', '8823827920', 'mag esports', 'magesports', 'mag_esports'];
-const VALID_AMOUNTS   = ['25', '30', '32', '35', '40', '50', '60', '100'];
-const OCR_MIN_CONF    = 35;
-const AUTO_VERIFY_MIN = 7;
+const MAG_UPI_IDS = ['8823827920@okbizaxis', '8823827920', 'mag esports', 'magesports', 'mag_esports', 'mac esports', 'maq esports', '882382792o', 'chetan bhul', 'chetan'];
+const OCR_MIN_CONF = 30;
 
-// ─────────────────────────────────────────────────────
-//  RATE LIMITER & SESSION
-// ─────────────────────────────────────────────────────
-const RATE_LIMIT  = 5;
-const RATE_WINDOW = 60 * 1000;
+const getValidPrices = () => `${settings.miniPrice} ${settings.megaPrice} ${settings.mediumPrice} ${settings.competitivePrice} ${settings.livePrice}`.match(/\d+/g) || [];
+
+const saveSession  = async (phone, data) => { data.createdAt = new Date(); await TempSession.findOneAndUpdate({ phone }, data, { upsert: true }); };
+const clearSession = async (phone) => { await TempSession.deleteOne({ phone }); };
+
+const setQrReminder = (userId) => {
+    if (qrReminders[userId]) clearTimeout(qrReminders[userId]);
+    qrReminders[userId] = setTimeout(async () => {
+        const pData = await TempSession.findOne({ phone: userId });
+        if (!pData || pData.state === 'AWAITING_TEAM_NAME') { delete qrReminders[userId]; return; }
+        try {
+            await safeSend(userId, `🚨 *FINAL REMINDER!* 🚨\n\nBhai aapne slot manga tha par abhi tak screenshot nahi bheja.\n\n⚡ *Sirf kuch LAST SLOTS bache hain!* ⚡\nJaldi pay karke screenshot bhejo warna aapka slot cancel kar diya jayega!`);
+        } catch (e) {}
+        delete qrReminders[userId];
+    }, 5 * 60 * 1000);
+};
+const clearQrReminder = (userId) => { if (qrReminders[userId]) { clearTimeout(qrReminders[userId]); delete qrReminders[userId]; } };
 
 const isRateLimited = (userId) => {
     const now = Date.now();
     if (!rateLimitMap[userId]) rateLimitMap[userId] = [];
-    rateLimitMap[userId] = rateLimitMap[userId].filter(t => now - t < RATE_WINDOW);
-    if (rateLimitMap[userId].length >= RATE_LIMIT) return true;
+    rateLimitMap[userId] = rateLimitMap[userId].filter(t => now - t < 60000);
+    if (rateLimitMap[userId].length >= 10) return true;
     rateLimitMap[userId].push(now);
     return false;
 };
 
-const SESSION_TTL = 5 * 60 * 1000;
-const touchSession = (userId) => {
-    if (sessionTimeout[userId]) clearTimeout(sessionTimeout[userId]);
-    sessionTimeout[userId] = setTimeout(() => {
-        if (pendingPayments[userId]) {
-            delete pendingPayments[userId];
-            log('INFO', `Session expired: ${userId}`);
-            enqueue(userId, async () => {
-                await safeSend(userId, '⌛ *Session timeout ho gayi.*\nDobara screenshot bhejo to restart karo.');
-            });
-        }
-    }, SESSION_TTL);
-};
-
-const clearSession = (userId) => {
-    if (sessionTimeout[userId]) clearTimeout(sessionTimeout[userId]);
-    delete sessionTimeout[userId];
-    delete pendingPayments[userId];
-};
-
-// ─────────────────────────────────────────────────────
-//  SLOT HELPERS & FOMO
-// ─────────────────────────────────────────────────────
-const readRecords      = () => safeRead('./records.json', []);
+const readRecords      = () => localRecords;
 const getSlotCount     = (type) => readRecords().filter(r => r.lobbyType?.toLowerCase() === type?.toLowerCase()).length;
-const isSlotsAvailable = (type) => getSlotCount(type) < maxSlots;
+const isSlotsAvailable = (type) => { if (settings.closedLobbies.includes(type.toLowerCase())) return false; return getSlotCount(type) < maxSlots; };
 
-const saveRecord = (teamName, number, lobbyType, utr = 'N/A', amount = 'N/A') => {
-    const records = readRecords();
-    records.push({ teamName, number: `+${number}`, lobbyType, utr, amount, timestamp: new Date().toLocaleString('en-IN') });
-    safeWrite('./records.json', records);
-    log('INFO', `✅ Registered: ${teamName} | ${lobbyType} | +${number}`);
+const saveRecord = (teamName, number, lobbyType, utr = 'N/A', amount = 'N/A', imgHash = 'N/A') => {
+    const istTimestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
+    const doc = { teamName, number: `+${number}`, lobbyType, utr, amount, imgHash, timestamp: istTimestamp };
+    localRecords.push(doc);
+    new DailyRecord(doc).save().catch(e => log('ERROR', 'MongoDB Save Error: ' + e));
 };
 
 const removeRecord = (number) => {
-    const records  = readRecords();
-    const filtered = records.filter(r => r.number !== `+${number}` && r.number !== number);
-    safeWrite('./records.json', filtered);
+    const numStr = String(number).startsWith('+') ? number : `+${number}`;
+    localRecords = localRecords.filter(r => r.number !== numStr && r.number !== number);
+    DailyRecord.deleteMany({ $or: [{ number: numStr }, { number: number }] }).catch(e => log('ERROR', 'DB Del Error: ' + e));
 };
 
-const isDuplicateUTR = (utr) => {
-    if (!utr || utr === 'N/A') return false;
-    return readRecords().some(r => r.utr === utr);
-};
+const isDuplicateUTR   = (utr)  => { if (!utr || utr === 'N/A') return false; return readRecords().some(r => r.utr === utr); };
+const isDuplicateHash  = (hash) => { if (!hash || hash === 'N/A') return false; return readRecords().some(r => r.imgHash === hash); };
+const isDuplicateTeam  = (teamName, lobbyType) => readRecords().some(r => r.lobbyType?.toLowerCase() === lobbyType.toLowerCase() && r.teamName.toLowerCase().trim() === teamName.toLowerCase().trim());
 
 const getStats = () => {
     const records = readRecords();
     const stats = { total: records.length };
     LOBBY_TYPES.forEach(t => stats[t] = records.filter(r => r.lobbyType?.toLowerCase() === t).length);
     return stats;
-};
-
-const getFomoText = (slotsLeft) => {
-    if (slotsLeft === 0) return `🛑 *FULL HOGAYA*`;
-    if (slotsLeft <= 3)  return `🔥 *SIRF ${slotsLeft} SLOT BAKI HAI!*`;
-    return `⚡ *Bohot kam slots baki hain!*`;
 };
 
 // ─────────────────────────────────────────────────────
@@ -216,53 +203,79 @@ let _ocrWorker = null;
 const getOCRWorker = async () => {
     if (!_ocrWorker) {
         _ocrWorker = await Tesseract.createWorker('eng', 1, { logger: () => {} });
-        await _ocrWorker.setParameters({ tessedit_pageseg_mode: '11', preserve_interword_spaces: '1' });
+        await _ocrWorker.setParameters({ tessedit_pageseg_mode: '11', preserve_interword_spaces: '1', user_defined_dpi: '300' });
     }
     return _ocrWorker;
 };
 const resetOCRWorker = async () => { try { if (_ocrWorker) await _ocrWorker.terminate(); } catch {} _ocrWorker = null; };
 
+const checkDateStatus = (lowerText) => {
+    const now = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Kolkata' }));
+    const formatD = (d) => {
+        const day = d.getDate(); const dayPad = String(day).padStart(2, '0');
+        const mon = d.toLocaleString('en-US', { month: 'short' }).toLowerCase();
+        const monFull = d.toLocaleString('en-US', { month: 'long' }).toLowerCase();
+        return [`${day} ${mon}`, `${dayPad} ${mon}`, `${day} ${monFull}`, `${dayPad} ${monFull}`];
+    };
+    const todays = formatD(now);
+    if (/\btoday|aaj\b/i.test(lowerText)) return 'TODAY';
+    let foundAnyDate = false; let foundToday = false;
+    const dateRegex = /\b(\d{1,2})\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/ig;
+    let match;
+    while ((match = dateRegex.exec(lowerText)) !== null) { foundAnyDate = true; if (todays.some(r => match[0].toLowerCase().includes(r))) foundToday = true; }
+    const numDateRegex = /\b(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})\b/g;
+    while ((match = numDateRegex.exec(lowerText)) !== null) { foundAnyDate = true; const d = parseInt(match[1]); const m = parseInt(match[2]); if (d === now.getDate() && m === (now.getMonth() + 1)) foundToday = true; }
+    if (foundToday) return 'TODAY';
+    if (foundAnyDate) return 'OLD';
+    return 'UNKNOWN';
+};
+
 const extractUTR = (text) => {
-    const patterns = [ /\b(T\d{11})\b/i, /UTR[:\s#]*([A-Z0-9]{10,22})/i, /Ref(?:erence)?\.?\s*(?:No\.?|ID|Number)?[:\s]*([A-Z0-9]{8,22})/i, /Transaction\s*(?:ID|No\.?|Ref\.?)[:\s]*([A-Z0-9]{8,22})/i, /UPI\s*(?:Ref(?:\.?\s*No)?|Txn\.?|ID)[:\s]*([A-Z0-9]{8,22})/i, /\b([A-Z]{2,4}\d{9,14})\b/, /\b(\d{12})\b/, /\b(\d{16})\b/ ];
-    for (const pat of patterns) { const m = text.match(pat); if (m && m[1] && m[1].length >= 8) return m[1].toUpperCase(); }
+    const cleanText = text.replace(/O/g, '0').replace(/l/g, '1');
+    const patterns = [ /\b(T\d{11})\b/i, /UTR[:\s#]*([A-Z0-9]{10,22})/i, /Transaction\s*(?:ID|No\.?|Ref\.?)[:\s]*([A-Z0-9]{8,22})/i, /UPI\s*(?:Ref(?:\.?\s*No)?|Txn\.?|ID)[:\s]*([A-Z0-9]{8,22})/i, /\b([A-Z]{2,4}\d{9,14})\b/, /\b(\d{12})\b/, /\b(\d{16})\b/ ];
+    for (const pat of patterns) { const m = cleanText.match(pat); if (m && m[1] && m[1].length >= 8) return m[1].toUpperCase(); }
     return null;
+};
+
+const isValidUPI_UTR = (utr) => {
+    if (!utr) return true;
+    const cleanUtr = utr.replace(/O/gi, '0').replace(/l/gi, '1').replace(/S/gi, '5');
+    if (cleanUtr.length === 12 && /^\d+$/.test(cleanUtr)) {
+        const currentYearDigit = String(new Date().getFullYear()).slice(-1);
+        if (cleanUtr[0] !== currentYearDigit) return false;
+    }
+    return true;
 };
 
 const extractAmount = (rawText) => {
-    const text = rawText.replace(/,/g, '');
-    const labeled = [ /(?:Amount\s*(?:Paid)?|Paid|Total(?:\s*Amount)?|Payment)[:\s]*(?:₹|Rs\.?|INR)?\s*(\d+(?:\.\d{1,2})?)/i, /(?:₹|Rs\.?|INR)\s*(\d+(?:\.\d{1,2})?)/i ];
-    for (const pat of labeled) { const m = text.match(pat); if (m) return String(parseInt(m[1], 10)); }
-    for (const m of text.matchAll(/\b(\d{2,4})\.0{1,2}\b/g)) if (VALID_AMOUNTS.includes(m[1])) return m[1];
-    for (const m of text.matchAll(/\b(\d{2,4})\b/g))        if (VALID_AMOUNTS.includes(m[1])) return m[1];
+    let text = rawText.replace(/,/g, '').toLowerCase().replace(/o/g, '0').replace(/\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/gi, ' ');
+    const validPrices = getValidPrices();
+    if (validPrices.length === 0) return null;
+    const symMatch = text.match(/(?:₹|rs\.?|inr)\s*(\d{2,4})/i);
+    if (symMatch && validPrices.includes(symMatch[1])) return String(symMatch[1]);
+    const looseSymMatch = text.match(/(?:\?|f|z|x|>|<|\|)\s*(\d{2,4})/i);
+    if (looseSymMatch && validPrices.includes(looseSymMatch[1])) return String(looseSymMatch[1]);
+    const cleanText = text.replace(/\d{6,}/g, ' ');
+    const regex = new RegExp(`(?:^|\\s)(${validPrices.join('|')})(?:\\.00)?(?:\\s|$)`, 'i');
+    const matches = cleanText.match(regex);
+    if (matches && matches[1]) return matches[1];
     return null;
 };
 
-const hasRecentDate = (lowerText) => {
-    const MONTHS = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
-    const now = new Date();
-    for (const offset of [0, -1]) {
-        const d = new Date(now); d.setDate(d.getDate() + offset);
-        const day = String(d.getDate()); const mon = MONTHS[d.getMonth()]; const mm = String(d.getMonth() + 1); const mmPad = mm.padStart(2, '0');
-        if (!lowerText.includes(day)) continue;
-        if ([mon, `/${mm}/`, `-${mm}-`, `/${mmPad}/`, `-${mmPad}-`].some(s => lowerText.includes(s))) return true;
-    }
-    return false;
-};
-
 const analyzeOCR = (rawText, utr, amount) => {
-    const t = rawText.toLowerCase();
-    const toMag = MAG_UPI_IDS.some(id => t.includes(id.toLowerCase()));
-    const checks = {
-        hasSuccess:    { w: 3, pass: /success|paid|completed|approved|received|payment\s*done/i.test(t) },
-        hasDate:       { w: 2, pass: hasRecentDate(t) },
-        hasUPI:        { w: 2, pass: /upi|phonepe|gpay|google\s*pay|paytm|bhim/i.test(t) },
-        hasUTR:        { w: 2, pass: !!utr },
-        isValidAmount: { w: 2, pass: !!(amount && VALID_AMOUNTS.includes(amount)) },
-        hasMagEsports: { w: 1, pass: toMag },
-    };
-    const earned = Object.values(checks).reduce((s, c) => s + (c.pass ? c.w : 0), 0);
-    const status = (checks.hasSuccess.pass && earned >= AUTO_VERIFY_MIN) ? '✅ AUTO-VERIFIED' : (checks.hasSuccess.pass && earned >= 4) ? '⚠️ PARTIAL MATCH' : '❌ FAKE/OLD';
-    return { status };
+    const t = rawText.toLowerCase().replace(/[\n\r]/g, ' ');
+    const toMag = MAG_UPI_IDS.some(id => t.includes(id));
+    const dateStatus = checkDateStatus(t);
+    if (dateStatus === 'OLD') return { status: '❌ FAKE/OLD DATE', isAuto: false };
+    const isSuccess = /success|succes|paid|pald|completed|complet|approved|received|payment\s*done/i.test(t);
+    if (isSuccess && dateStatus === 'TODAY' && !!amount) {
+        if (utr && !isValidUPI_UTR(utr)) return { status: '❌ FAKE APP DETECTED (Invalid UTR Year)', isAuto: false };
+        if (!toMag) return { status: '🚨 WRONG PAYEE', isAuto: false };
+        if (!utr) return { status: '⚠️ UTR MISSING (Manual Check)', isAuto: false };
+        return { status: '✅ AUTO-VERIFIED', isAuto: true };
+    }
+    if (isSuccess) return { status: '⚠️ PARTIAL MATCH', isAuto: false };
+    return { status: '❌ FAKE/INVALID', isAuto: false };
 };
 
 const isInvalidName = (name) => {
@@ -273,263 +286,385 @@ const isInvalidName = (name) => {
 };
 
 // ─────────────────────────────────────────────────────
-//  MESSAGING HELPERS
+//  MESSAGING HELPERS (Dynamic Display)
 // ─────────────────────────────────────────────────────
 const getWelcomeMessage = () => {
-    let msg = `🎮 *MAG ESPORTS — LOBBY REGISTRATION*\n━━━━━━━━━━━━━━━━━━━━\n\nKonsi lobby leni hai?\n\n`;
-    if (activeMode.length === 0) return `🚫 *MAG ESPORTS*\nAbhi koi lobby active nahi hai. Thodi der baad try karein.`;
+    let msg = `🎮 *${settings.scrimName} — LOBBY REGISTRATION*\n⏰ *Time:* ${settings.lobbyTime}\n━━━━━━━━━━━━━━━━━━━━\n\nKonsi lobby leni hai?\n\n`;
+    if (activeMode.length === 0) return `🚫 *${settings.scrimName}*\nAbhi koi lobby active nahi hai.`;
 
     activeMode.forEach(t => {
-        const slotsLeft = maxSlots - getSlotCount(t);
-        const fomo = getFomoText(slotsLeft);
-        msg += `🔹 *${t.toUpperCase()} LOBBY*\n   💰 Price      : *₹${settings[`${t}Price`]}*\n   🎟️ Status     : ${fomo}\n\n`;
+        const isFull = !isSlotsAvailable(t);
+        msg += `🔹 *${t.toUpperCase()} LOBBY* - ` + (isFull ? `🛑 *FULL*` : `₹${settings[`${t}Price`]}`) + `\n`;
     });
-    
+
     let sample = activeMode[0].charAt(0).toUpperCase() + activeMode[0].slice(1);
-    msg += `━━━━━━━━━━━━━━━━━━━━\n👉 Apna lobby type likh kar bhejo (eg. *${sample}*)\n━━━━━━━━━━━━━━━━━━━━`;
+    msg += `\n━━━━━━━━━━━━━━━━━━━━\n👉 Apna lobby type likh kar bhejo (eg. *${sample}*)\n━━━━━━━━━━━━━━━━━━━━`;
     return msg;
 };
 
 const sendLobbyInfo = async (to, lobbyType) => {
-    const typeKey   = lobbyType.toLowerCase();
-    const price     = settings[`${typeKey}Price`];
-    const slotsLeft = maxSlots - getSlotCount(typeKey);
-    const fomo      = getFomoText(slotsLeft);
+    const typeKey = lobbyType.toLowerCase();
+    const price = settings[`${typeKey}Price`];
+    
+    if (typeKey === 'live' && fs.existsSync('./mega.png')) {
+        await safeSend(to, MessageMedia.fromFilePath('./mega.png'));
+    }
 
-    await safeSend(to, `🔹 *${lobbyType.toUpperCase()} LOBBY*\n━━━━━━━━━━━━━━━━━━━━\n💰 Entry Fee  : *₹${price}*\n🎟️ Status     : ${fomo}\n━━━━━━━━━━━━━━━━━━━━\n👇 QR scan karke *₹${price}* pay karo\naur payment ka screenshot bhejo.`);
+    await safeSend(to, `🔹 *${lobbyType.toUpperCase()} LOBBY*\n⏰ *Time:* ${settings.lobbyTime}\n━━━━━━━━━━━━━━━━━━━━\n💰 Entry Fee  : *₹${price}*\n━━━━━━━━━━━━━━━━━━━━\n👇 QR scan karke *₹${price}* pay karo aur screenshot bhejo.`);
 
     if (fs.existsSync('./qr.png')) {
-        const qrImg = MessageMedia.fromFilePath('./qr.png');
-        await safeSend(to, qrImg, { caption: `📲 Scan & Pay *₹${price}* → Screenshot bhejo` });
-    } else {
-        await safeSend(to, `⚠️ QR image abhi available nahi. Admin se contact karo.`);
+        await safeSend(to, MessageMedia.fromFilePath('./qr.png'), { caption: `📲 Scan & Pay *₹${price}* → Screenshot bhejo` });
+        setQrReminder(to);
     }
 };
 
+const sendAdminMedia = async (mediaPath, caption) => {
+    const adminId = client.info.wid.user + '@c.us';
+    if (mediaPath && fs.existsSync(mediaPath)) {
+        try {
+            const imgToSend = MessageMedia.fromFilePath(mediaPath);
+            await client.sendMessage(adminId, imgToSend, { caption });
+            setTimeout(() => { try { fs.unlinkSync(mediaPath); } catch(e){} }, 5000);
+            return;
+        } catch (e) {}
+    }
+    try { await client.sendMessage(adminId, caption); } catch(err) {}
+};
+
 const processVerification = async (msg, teamName, lobbyType, paymentData) => {
-    const { media, status, utr, amount } = paymentData;
+    const { mediaPath, status, utr, amount, imgHash, isAuto } = paymentData;
     const cleanNumber = await getRealNumber(msg);
-    const displayNum  = `+${cleanNumber}`;
     const rawId       = msg.from;
     const link        = links[lobbyType.toLowerCase()];
 
-    if (status === '✅ AUTO-VERIFIED') {
+    const adminDetails = `Team: *${teamName}*\nLobby: *${lobbyType}*\nNumber: +${cleanNumber}\nID: ${rawId}\nUTR: ${utr || 'Not found'}\nAmount: ₹${amount || 'null'}`;
+
+    if (isAuto || status === '✅ AUTO-VERIFIED') {
         if (isDuplicateUTR(utr)) {
-            await sendAdminMedia(media, `⚠️ DUPLICATE UTR BLOCKED!\nTeam: *${teamName}*\nLobby: *${lobbyType}*\nNumber: ${displayNum}\nID: ${rawId}\nUTR: ${utr}\n\nReply *ok* to force approve or *ban* to deny.`);
-            return safeSend(rawId, "⚠️ Payment already used lag raha hai. Admin check karega.");
+            await sendAdminMedia(mediaPath, `⚠️ DUPLICATE UTR BLOCKED!\n${adminDetails}\n\nReply *ok* to force approve or *ban* to deny.`);
+            return safeSend(msg.from, "⚠️ Ye payment already register ho chuki hai. Admin check karega.");
         }
-        saveRecord(teamName, cleanNumber, lobbyType, utr || 'N/A', amount || 'N/A');
-        await safeSend(rawId, `✅ *PAYMENT VERIFIED!*\nTeam  : *${teamName}*\nLobby : *${lobbyType}*\n━━━━━━━━━━━━━━━━━━━━\n🔗 Group join karo 👇\n${link}`);
-        await sendAdminMedia(media, `✅ AUTO-VERIFIED\nTeam: *${teamName}*\nLobby: *${lobbyType}*\nNumber: ${displayNum}\nID: ${rawId}\nUTR: ${utr || 'N/A'}\n\nReply *ban* to revoke.`);
+        saveRecord(teamName, cleanNumber, lobbyType, utr || 'N/A', amount || 'N/A', imgHash);
+        await safeSend(msg.from, `✅ *PAYMENT VERIFIED!*\nTeam: *${teamName}*\nLobby: *${lobbyType}*\n━━━━━━━━━━━━━━━━━━━━\n🔗 Group join karo 👇\n${link}`);
+        await sendAdminMedia(mediaPath, `✅ AUTO-VERIFIED\n${adminDetails}\n\nReply *ban* to revoke.`);
     } else {
-        await sendAdminMedia(media, `🚨 MANUAL CHECK REQUIRED\nTeam: *${teamName}*\nLobby: *${lobbyType}*\nNumber: ${displayNum}\nID: ${rawId}\nStatus: ${status}\nUTR: ${utr || 'Not found'}\n\nReply *ok* to approve or *ban* to deny.`);
-        await safeSend(rawId, `⏳ *Payment manual check pe gaya.*\nAdmin verify karega. Thoda wait karo. 🙏`);
+        await sendAdminMedia(mediaPath, `🚨 MANUAL CHECK REQUIRED\n${adminDetails}\nStatus: ${status}\n\nReply *ok* to approve or *ban* to deny.`);
+        await safeSend(msg.from, `⏳ *Payment manual check pe gaya.*\nAdmin verify karega. Thoda wait karo. 🙏`);
     }
 };
 
 const getRealNumber = async (msg) => { try { const c = await msg.getContact(); if (c?.number?.length >= 10) return c.number; } catch {} return msg.from.split('@')[0]; };
-// Admin log messages are instant (bypasses safeSend)
-const sendAdminMedia = async (media, caption) => { try { await client.sendMessage(client.info.wid._serialized, media, { caption }); } catch {} };
 
 // ─────────────────────────────────────────────────────
 //  CLIENT EVENTS
 // ─────────────────────────────────────────────────────
-client.on('qr',    qr => qrcode.generate(qr, { small: true }));
-client.on('ready', ()  => log('INFO', '✅ BOT READY'));
+client.on('qr', qr => { qrcode.generate(qr, { small: true }); });
+client.on('ready', () => log('INFO', '✅ BOT READY! MULTI-LOBBY ANTI-BAN VERSION LOADED.'));
 client.on('auth_failure', m => log('ERROR', `Auth failed: ${m}`));
-client.on('disconnected', reason => { log('WARN', `Disconnected: ${reason}. Reinitializing in 5s...`); setTimeout(() => client.initialize(), 5000); });
+client.on('disconnected', reason => { setTimeout(() => client.initialize(), 5000); });
 
 // ─────────────────────────────────────────────────────
 //  MESSAGE HANDLER
 // ─────────────────────────────────────────────────────
 client.on('message_create', async msg => {
     try {
+        const now = Math.floor(Date.now() / 1000);
+        if ((now - msg.timestamp) > 60) return;
+        if (msg.from.includes('@g.us') || msg.to.includes('@g.us')) return;
+        if (msg.isStatus) return;
+
         const rawText   = msg.body.trim();
         const textLower = rawText.toLowerCase();
         const cmd       = textLower.split(/\s+/)[0];
-        const isAdmin   = msg.fromMe || msg.from === '100334781354038@lid' || msg.from === client.info.wid._serialized;
 
-        // ══════════════════════════════════════════
-        //  ADMIN BLOCK (Instant execution, No Queue)
-        // ══════════════════════════════════════════
+        const adminId = client.info.wid.user + '@c.us';
+        const isAdmin = msg.fromMe || msg.from === adminId || msg.from === client.info.wid._serialized;
+
+        if (msg.fromMe && !rawText.startsWith('.') && !['ok', 'ban'].includes(textLower)) return;
+
         if (isAdmin) {
-            if (cmd === '.setlink') {
-                const parts = rawText.split(/\s+/); const type = parts[1]?.toLowerCase(); const linkMatch = rawText.match(/https?:\/\/[^\s]+/i);
-                if (linkMatch && LOBBY_TYPES.includes(type)) { links[type] = linkMatch[0]; saveLinks(); return msg.reply(`✅ *${type.toUpperCase()}* link updated.`); }
-                return msg.reply(`⚠️ Usage: .setlink <${LOBBY_TYPES.join('/')}> <link>`);
-            }
-            if (cmd === '.setprice') {
-                const parts = rawText.split(/\s+/); const type = parts[1]?.toLowerCase(); const price = parts[2];
-                if (LOBBY_TYPES.includes(type) && price) { settings[`${type}Price`] = price; saveSettings(); return msg.reply(`✅ ${type.toUpperCase()} price: ₹${price}`); }
-                return msg.reply(`⚠️ Usage: .setprice <${LOBBY_TYPES.join('/')}> <amount>`);
-            }
-            if (cmd === '.list') {
-                const records = readRecords(); if (!records.length) return msg.reply('📋 No registrations yet.');
-                let out = `📋 *SLOTLIST*\n\n`;
-                LOBBY_TYPES.forEach(t => {
-                    const list = records.filter(r => r.lobbyType?.toLowerCase() === t);
-                    if (list.length) {
-                        out += `🔹 *${t.toUpperCase()} (${list.length}/${maxSlots})*\n`;
-                        list.forEach((r, i) => out += `${i+1}. ${r.teamName}\n`);
-                        out += `\n`;
-                    }
-                });
-                return msg.reply(out.trim());
-            }
-            if (cmd === '.clear') { safeWrite('./records.json', []); return msg.reply('🧹 Slotlist cleared.'); }
-            if (cmd === '.stats') {
-                const s = getStats(); 
-                let statMsg = `📊 *BOT STATS*\n━━━━━━━━━━━━━━━\nTotal Registered : ${s.total}\n`;
-                LOBBY_TYPES.forEach(t => statMsg += `${t.toUpperCase()} Slots : ${s[t]}/${maxSlots}\n`);
-                statMsg += `\nActive Modes : ${activeMode.map(m => m.toUpperCase()).join(', ')}\n━━━━━━━━━━━━━━━`;
-                return msg.reply(statMsg);
-            }
-            if (cmd === '.setslots') {
-                const n = parseInt(rawText.split(/\s+/)[1]); if (!isNaN(n) && n > 0) { maxSlots = n; return msg.reply(`✅ Max slots per lobby: *${n}*`); }
-            }
-            if (cmd === '.setmode') {
-                const args = textLower.split(/\s+/).slice(1);
-                if (args.length === 0) return msg.reply(`⚠️ Usage: .setmode <all / mini mega live competitive ...>`);
-                
-                if (args.includes('all')) {
-                    activeMode = [...LOBBY_TYPES];
-                } else {
-                    const validTypes = args.filter(a => LOBBY_TYPES.includes(a));
-                    if (validTypes.length === 0) return msg.reply(`⚠️ Invalid input. Available: ${LOBBY_TYPES.join(', ')}`);
-                    activeMode = [...new Set(validTypes)]; 
-                }
-                saveMode(); 
-                return msg.reply(`✅ *Open Lobbies: ${activeMode.map(m => m.toUpperCase()).join(', ')}*`);
-            }
-            if (msg.hasQuotedMsg && (cmd === 'ok' || cmd === 'ban')) {
-                const body = (await msg.getQuotedMessage()).body || '';
-                const targetId = (body.match(/ID:\s*(\S+)/) || [])[1];
-                const cleanNumber = (body.match(/Number:\s*\+?(\d+)/) || [])[1] || (targetId ? targetId.split('@')[0] : null);
-                if (targetId) {
-                    const teamName = (body.match(/Team:\s*\*?([^\n*]+)\*?/) || [])[1]?.trim() || 'Unknown';
-                    const lobbyType = (body.match(/Lobby:\s*\*?([^\n*]+)\*?/i) || [])[1]?.trim() || 'Mini';
-                    if (cmd === 'ok') {
-                        saveRecord(teamName, cleanNumber, lobbyType, 'N/A', 'N/A');
-                        enqueue(targetId, async () => {
-                            await safeSend(targetId, `✅ *VERIFIED BY ADMIN!*\nTeam: *${teamName}*\n🔗 Link: ${links[lobbyType.toLowerCase()]}`);
-                        });
-                        return msg.reply(`✅ Approved: ${teamName}`);
-                    }
-                    if (cmd === 'ban') {
-                        if (body.includes('AUTO-VERIFIED')) removeRecord(cleanNumber);
-                        enqueue(targetId, async () => {
-                            await safeSend(targetId, `🚫 *Payment Rejected!*\nSahi screenshot bhejo ya admin se contact karo.`);
-                        });
-                        return msg.reply(`🚫 Rejected: ${teamName}`);
-                    }
-                }
-            }
-            const adminCmds = ['.setlink','.setprice','.list','.clear','.stats','.setslots','.setmode','ok','ban'];
-            if (!adminCmds.includes(cmd)) return;
+            await handleAdminMessage(msg, rawText, textLower, cmd);
+            return;
         }
 
-        // ══════════════════════════════════════════
-        //  PLAYER BLOCK (Enqueued & Anti-Ban Active)
-        // ══════════════════════════════════════════
-        enqueue(msg.from, async () => {
-            if (isRateLimited(msg.from)) {
-                return safeSend(msg.from, '🚦 Bahut saare messages bhej rahe ho. Thoda ruko.');
-            }
+        if (isRateLimited(msg.from)) return;
+        if (antiSpam.has(msg.from)) return;
+        antiSpam.add(msg.from);
+        setTimeout(() => antiSpam.delete(msg.from), 1000);
 
-            // ── Pending States ──
-            if (pendingPayments[msg.from]?.state === 'AWAITING_LOBBY') {
-                const pData = pendingPayments[msg.from]; touchSession(msg.from);
-                
-                const foundType = LOBBY_TYPES.find(t => textLower.includes(t));
-                if (!foundType) return safeSend(msg.from, `⚠️ Lobby select karo. Available: *${activeMode.map(m => m.charAt(0).toUpperCase() + m.slice(1)).join('*, *')}*`);
-                
-                if (!activeMode.includes(foundType)) return safeSend(msg.from, `🚫 *${foundType.toUpperCase()} lobby abhi close hai.*\n👉 Open Lobbies: *${activeMode.map(m => m.toUpperCase()).join(', ')}*`);
-                
-                const lobbyType = foundType.charAt(0).toUpperCase() + foundType.slice(1);
-                if (!isSlotsAvailable(lobbyType)) { clearSession(msg.from); return safeSend(msg.from, `😔 *${lobbyType} lobby full ho gayi!*`); }
-                
-                pData.lobbyType = lobbyType; pData.state = 'AWAITING_TEAM_NAME'; touchSession(msg.from);
-                return safeSend(msg.from, `✅ *${lobbyType} Lobby* select ki!\n\nApna *Team Name* bhejo:`);
-            }
-            if (pendingPayments[msg.from]?.state === 'AWAITING_TEAM_NAME') {
-                const pData = pendingPayments[msg.from]; touchSession(msg.from);
-                if (isInvalidName(rawText)) return safeSend(msg.from, '⚠️ Ek proper *Team Name* bhejo.');
-                if (!isSlotsAvailable(pData.lobbyType)) { clearSession(msg.from); return safeSend(msg.from, `🛑 *${pData.lobbyType} lobby full ho gayi!*`); }
-                clearSession(msg.from); return await processVerification(msg, rawText, pData.lobbyType, pData);
-            }
-
-            // ── Screenshot ──
-            if (msg.hasMedia) {
-                const media = await msg.downloadMedia();
-                if (!media?.mimetype?.startsWith('image/')) return safeSend(msg.from, '🛑 Sirf *payment screenshot image* bhejo.');
-                await safeSend(msg.from, '⏳ Screenshot check ho raha hai...');
-                try {
-                    const buffer = Buffer.from(media.data, 'base64');
-                    const { data: { text, confidence } } = await (await getOCRWorker()).recognize(buffer);
-                    let statusObj = analyzeOCR(text, extractUTR(text), extractAmount(text));
-                    if (Math.round(confidence) < OCR_MIN_CONF) statusObj.status = '⚠️ LOW IMAGE QUALITY';
-                    const pData = { media, status: statusObj.status, utr: extractUTR(text), amount: extractAmount(text), state: 'AWAITING_LOBBY' };
-                    
-                    const anySlots = activeMode.some(t => isSlotsAvailable(t));
-                        
-                    if (!anySlots) return safeSend(msg.from, `🛑 Abhi ki sabhi open lobbies full ho chuki hain!`);
-                    pendingPayments[msg.from] = pData; touchSession(msg.from);
-                    return safeSend(msg.from, `✅ *Screenshot receive ho gaya!*\nKaunsi lobby leni hai?\n👉 Type: *${activeMode.map(m => m.charAt(0).toUpperCase() + m.slice(1)).join('*, *')}*`);
-                } catch (e) {
-                    await resetOCRWorker();
-                    pendingPayments[msg.from] = { media, status: '❌ OCR FAILED', state: 'AWAITING_LOBBY' }; touchSession(msg.from);
-                    return safeSend(msg.from, `⚠️ Screenshot check me error aayi.\nKaunsi lobby leni hai?\n👉 Type: *${activeMode.map(m => m.charAt(0).toUpperCase() + m.slice(1)).join('*, *')}*`);
-                }
-            }
-
-            // ── SMART KEYWORD AI ENGINE ──
-            if (!msg.hasMedia && !pendingPayments[msg.from] && rawText.length > 0) {
-                
-                const asksQR = /qr|scan|pay|upi|kese|kaise|bhejo|number|send/i.test(textLower);
-                const foundLobby = LOBBY_TYPES.find(t => 
-                    textLower.includes(t) || 
-                    settings[`${t}Price`].toString().split('/').some(p => textLower.includes(p.trim()))
-                );
-
-                if (foundLobby || asksQR) {
-                    if (antiSpam.has(msg.from)) return;
-                    antiSpam.add(msg.from); setTimeout(() => antiSpam.delete(msg.from), 4000);
-
-                    let targetLobby = foundLobby ? foundLobby.toLowerCase() : null;
-                    
-                    if (!targetLobby && activeMode.length === 1) {
-                        targetLobby = activeMode[0];
-                    }
-
-                    if (targetLobby) {
-                        if (!activeMode.includes(targetLobby)) return safeSend(msg.from, `🚫 *${targetLobby.toUpperCase()}* abhi close hai.\n👉 Open Lobbies: *${activeMode.map(m => m.toUpperCase()).join(', ')}*`);
-                        if (!isSlotsAvailable(targetLobby)) return safeSend(msg.from, `😔 *${targetLobby.toUpperCase()} lobby full ho gayi!*`);
-                        return await sendLobbyInfo(msg.from, targetLobby);
-                    } else {
-                        if (fs.existsSync('./qr.png')) {
-                            const qrImg = MessageMedia.fromFilePath('./qr.png');
-                            let priceText = "";
-                            activeMode.forEach(t => priceText += `🔹 *${t.charAt(0).toUpperCase() + t.slice(1)}:* ₹${settings[`${t}Price`]}\n`);
-                            return safeSend(msg.from, `👇 *SCAN & PAY*\n\n${priceText}\nPay karke screenshot bhejein.`, { media: qrImg });
-                        } else {
-                            return safeSend(msg.from, '⚠️ QR image missing.');
-                        }
-                    }
-                }
-
-                // 3. Fallback Welcome Message
-                const welcomeRegex = /\b(hi|hello|hey|menu|book|slot|slots|register|tourney|tournament|\?|help|details)\b/i;
-                if (welcomeRegex.test(textLower)) {
-                    if (antiSpam.has(msg.from)) return;
-                    antiSpam.add(msg.from); setTimeout(() => antiSpam.delete(msg.from), 5000);
-                    return safeSend(msg.from, getWelcomeMessage());
-                }
-            }
-        }); // End of enqueue
-
+        enqueue(msg.from, () => handleUserMessage(msg, rawText, textLower));
     } catch (e) {
-        log('ERROR', `Handler error: ${e.message}`);
+        log('ERROR', `message_create outer error: ${e.message}`);
     }
 });
+
+// ─────────────────────────────────────────────────────
+//  ADMIN HANDLER (Instant multiple .setmode execution)
+// ─────────────────────────────────────────────────────
+const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
+    const replyAdmin = (text) => client.sendMessage(msg.from, text);
+
+    if (cmd === '.broadcast' || cmd === '.bc') {
+        const parts = rawText.split(/\s+/);
+        const targetLobby = parts[1]?.toLowerCase();
+        const bcMessage = parts.slice(2).join(' ');
+        if (!targetLobby || !bcMessage) return replyAdmin('⚠️ Usage: .bc <lobby/all> <Message>');
+        
+        let targets = (targetLobby === 'all') ? readRecords() : readRecords().filter(r => r.lobbyType?.toLowerCase() === targetLobby);
+        if (targets.length === 0) return replyAdmin(`⚠️ No teams registered.`);
+
+        await replyAdmin(`⏳ Broadcasting to ${targets.length} teams...`);
+        for (const team of targets) {
+            try {
+                await humanDelay(3000, 8000);
+                await client.sendMessage(`${team.number.replace('+', '')}@c.us`, `📢 *${settings.scrimName} ANNOUNCEMENT*\n━━━━━━━━━━━━━━━━━━━━\n\n${bcMessage}`);
+            } catch (e) {}
+        }
+        return replyAdmin(`✅ Broadcast sent.`);
+    }
+
+    if (cmd === '.setname' || cmd === '.settitle') {
+        const newName = rawText.slice(cmd.length).trim();
+        if (newName) { settings.scrimName = newName; saveSettings(); return replyAdmin(`✅ Name updated to: *${newName}*`); }
+    }
+
+    if (cmd === '.setlink') {
+        const parts = rawText.split(/\s+/); const type = parts[1]?.toLowerCase(); const linkMatch = rawText.match(/https?:\/\/[^\s]+/i);
+        if (linkMatch && LOBBY_TYPES.includes(type)) { links[type] = linkMatch[0]; saveLinks(); return replyAdmin(`✅ *${type.toUpperCase()}* link updated.`); }
+        return replyAdmin(`⚠️ Usage: .setlink <${LOBBY_TYPES.join('/')}> <link>`);
+    }
+
+    if (cmd === '.setprice') {
+        const parts = rawText.split(/\s+/); const type = parts[1]?.toLowerCase(); const price = parts[2];
+        if (LOBBY_TYPES.includes(type) && price)  { settings[`${type}Price`] = price; saveSettings(); return replyAdmin(`✅ ${type.toUpperCase()} price updated: ₹${price}`); }
+        return replyAdmin(`⚠️ Usage: .setprice <${LOBBY_TYPES.join('/')}> <amount>`);
+    }
+
+    if (cmd === '.setlobbytime' || cmd === '.settime') {
+        const time = rawText.slice(cmd.length).trim();
+        if (time) { settings.lobbyTime = time; saveSettings(); completedUsers.clear(); return replyAdmin(`✅ Time set to: *${time}*`); }
+    }
+
+    if (cmd === '.setfull') {
+        const type = rawText.split(/\s+/)[1]?.toLowerCase();
+        if (LOBBY_TYPES.includes(type)) {
+            if (!settings.closedLobbies.includes(type)) settings.closedLobbies.push(type); saveSettings(); return replyAdmin(`🛑 *${type.toUpperCase()} Lobby* marked FULL.`);
+        }
+    }
+
+    if (cmd === '.setopen') {
+        const type = rawText.split(/\s+/)[1]?.toLowerCase();
+        if (LOBBY_TYPES.includes(type)) {
+            settings.closedLobbies = settings.closedLobbies.filter(l => l !== type); saveSettings(); return replyAdmin(`✅ *${type.toUpperCase()} Lobby* OPEN.`);
+        }
+    }
+
+    if (cmd === '.list') {
+        const records = readRecords(); if (!records.length) return replyAdmin('📋 No registrations yet.');
+        let out = `📋 *SLOTLIST*\n\n`;
+        LOBBY_TYPES.forEach(t => {
+            const list = records.filter(r => r.lobbyType?.toLowerCase() === t);
+            if (list.length) {
+                out += `🔹 *${t.toUpperCase()} (${list.length}/${maxSlots})*\n`;
+                list.forEach((r, i) => out += `${i+1}. ${r.teamName}\n`);
+                out += `\n`;
+            }
+        });
+        return replyAdmin(out.trim());
+    }
+
+    if (cmd === '.clear') {
+        localRecords = []; DailyRecord.deleteMany({}).catch(()=>{}); completedUsers.clear(); settings.closedLobbies = []; saveSettings();
+        return replyAdmin('🧹 Slotlist cleared.');
+    }
+
+    if (cmd === '.stats') {
+        const s = getStats(); 
+        let statMsg = `📊 *BOT STATS*\n━━━━━━━━━━━━━━━\nScrim Name       : ${settings.scrimName}\nTotal Registered : ${s.total}\n`;
+        LOBBY_TYPES.forEach(t => statMsg += `${t.toUpperCase()} Slots : ${s[t]}/${maxSlots}\n`);
+        statMsg += `\nActive Open Modes : ${activeMode.map(m => m.toUpperCase()).join(', ')}\n━━━━━━━━━━━━━━━`;
+        return replyAdmin(statMsg);
+    }
+
+    if (cmd === '.setslots') {
+        const n = parseInt(rawText.split(/\s+/)[1]); if (!isNaN(n) && n > 0) { maxSlots = n; return replyAdmin(`✅ Max slots set: *${n}*`); }
+    }
+
+    if (cmd === '.setmode') {
+        const args = textLower.split(/\s+/).slice(1);
+        if (args.length === 0) return replyAdmin(`⚠️ Usage: .setmode <all / mini mega live competitive medium>`);
+        
+        if (args.includes('all')) {
+            activeMode = [...LOBBY_TYPES];
+        } else {
+            const validTypes = args.filter(a => LOBBY_TYPES.includes(a));
+            if (validTypes.length === 0) return replyAdmin(`⚠️ Invalid Input. Options: ${LOBBY_TYPES.join(', ')}`);
+            activeMode = [...new Set(validTypes)]; 
+        }
+        saveMode(); 
+        return replyAdmin(`✅ *Open Lobbies: ${activeMode.map(m => m.toUpperCase()).join(', ')}*`);
+    }
+
+    if (msg.hasQuotedMsg && (cmd === 'ok' || cmd === 'ban')) {
+        const body = (await msg.getQuotedMessage()).body || '';
+        let targetId = (body.match(/ID:\s*(\S+)/) || [])[1];
+        const cleanNumber = (body.match(/Number:\s*\+?(\d+)/) || [])[1] || (targetId ? targetId.split('@')[0] : null);
+        if (cleanNumber && (!targetId || targetId.includes('@lid'))) targetId = `${cleanNumber}@c.us`;
+        if (targetId) {
+            const teamName  = (body.match(/Team:\s*\*?([^\n*]+)\*?/) || [])[1]?.trim() || 'Unknown';
+            const lobbyType = (body.match(/Lobby:\s*\*?([^\n*]+)\*?/i) || [])[1]?.trim() || 'Mini';
+            if (cmd === 'ok') {
+                saveRecord(teamName, cleanNumber, lobbyType, 'N/A', 'N/A', 'MANUAL_OK');
+                await client.sendMessage(targetId, `✅ *VERIFIED BY ADMIN!*\nTeam: *${teamName}*\n🔗 Link: ${links[lobbyType.toLowerCase()]}`);
+                return replyAdmin(`✅ Approved: ${teamName}`);
+            }
+            if (cmd === 'ban') {
+                if (body.includes('AUTO-VERIFIED')) removeRecord(cleanNumber);
+                completedUsers.delete(targetId);
+                await client.sendMessage(targetId, `🚫 *Payment Rejected!*`);
+                return replyAdmin(`🚫 Rejected: ${teamName}`);
+            }
+        }
+    }
+};
+
+// ─────────────────────────────────────────────────────
+//  USER HANDLER
+// ─────────────────────────────────────────────────────
+const handleUserMessage = async (msg, rawText, textLower) => {
+    try {
+        const pData = await TempSession.findOne({ phone: msg.from });
+        const isWaitingText = (pData?.state === 'AWAITING_LOBBY' || pData?.state === 'AWAITING_TEAM_NAME');
+
+        let detectedLobbyIntent = null;
+        for (const type of LOBBY_TYPES) {
+            const prices = (String(settings[`${type}Price`]).match(/\d+/g) || []);
+            if (textLower.includes(type) || prices.some(p => new RegExp(`\\b${p}\\b`).test(textLower))) {
+                if (activeMode.includes(type)) { detectedLobbyIntent = type; break; }
+            }
+        }
+
+        const asksQR = /qr|scan|pay|upi|kese|kaise|bhejo|number|send|bar code|scanner|gpay|paytm|phonepe/i.test(textLower);
+        const hasDirectIntent = !!detectedLobbyIntent || asksQR;
+
+        if (!seenUsers.has(msg.from) && !msg.hasMedia) {
+            seenUsers.add(msg.from);
+            if (!isWaitingText && !hasDirectIntent) return safeSend(msg.from, getWelcomeMessage());
+        }
+
+        if (pData && !msg.hasMedia) {
+            if (pData.state === 'AWAITING_LOBBY') {
+                const foundType = LOBBY_TYPES.find(t => textLower.includes(t));
+                if (!foundType || !activeMode.includes(foundType)) return safeSend(msg.from, `⚠️ Sahi active lobby select karo.`);
+                const lobbyType = foundType.charAt(0).toUpperCase() + foundType.slice(1);
+                await saveSession(msg.from, { lobbyType, state: 'AWAITING_TEAM_NAME' });
+                return safeSend(msg.from, `✅ *${lobbyType} Lobby* select ki!\n\nApna *Team Name* bhejo:`);
+            }
+
+            if (pData.state === 'AWAITING_TEAM_NAME') {
+                if (isInvalidName(rawText)) return safeSend(msg.from, '⚠️ Ek proper *Team Name* bhejo.');
+                if (isDuplicateTeam(rawText, pData.lobbyType)) return safeSend(msg.from, `⚠️ Ye Team Name already registered hai!\nDoosra naam bhejo:`);
+                if (!isSlotsAvailable(pData.lobbyType)) { await clearSession(msg.from); return safeSend(msg.from, `🛑 Lobby full ho gayi hai!`); }
+                clearQrReminder(msg.from);
+                completedUsers.add(msg.from);
+                await processVerification(msg, rawText, pData.lobbyType, pData);
+                await clearSession(msg.from);
+                return;
+            }
+        }
+
+        if (msg.hasMedia && msg.type === 'image') {
+            clearQrReminder(msg.from);
+            const media = await msg.downloadMedia();
+            if (!media || !media.data) return safeSend(msg.from, "⚠️ Image error, dobara bhejo.");
+
+            const tempFileName = `./temp_${msg.from.split('@')[0]}.jpg`;
+            fs.writeFileSync(tempFileName, media.data, 'base64');
+            const imgHash = crypto.createHash('md5').update(media.data).digest('hex');
+
+            if (isDuplicateHash(imgHash)) {
+                try { fs.unlinkSync(tempFileName); } catch(e){}
+                return safeSend(msg.from, "⚠️ Duplicate screenshot detected! 🚫");
+            }
+
+            await safeSend(msg.from, '⏳ Screenshot check ho raha hai...');
+            try {
+                const buffer = Buffer.from(media.data, 'base64');
+                const { data: { text, confidence } } = await (await getOCRWorker()).recognize(buffer);
+
+                const utr = extractUTR(text);
+                const amount = extractAmount(text);
+                const resultObj = analyzeOCR(text, utr, amount);
+
+                if (Math.round(confidence) < OCR_MIN_CONF && resultObj.status === '✅ AUTO-VERIFIED') {
+                    resultObj.status = '⚠️ LOW IMAGE QUALITY (Manual Check)'; resultObj.isAuto = false;
+                }
+
+                let detectedLobby = null;
+                if (amount) {
+                    for (const type of LOBBY_TYPES) {
+                        const prices = (String(settings[`${type}Price`]).match(/\d+/g) || []);
+                        if (prices.includes(String(amount)) && activeMode.includes(type)) { detectedLobby = type.charAt(0).toUpperCase() + type.slice(1); break; }
+                    }
+                }
+
+                if (pData && pData.state === 'AWAITING_SS' && pData.lobbyType) detectedLobby = pData.lobbyType;
+                if (!detectedLobby && activeMode.length === 1) detectedLobby = activeMode[0].charAt(0).toUpperCase() + activeMode[0].slice(1);
+
+                if (detectedLobby) {
+                    await saveSession(msg.from, { mediaPath: tempFileName, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_TEAM_NAME', lobbyType: detectedLobby });
+                    return safeSend(msg.from, `✅ Screenshot mila! (₹${amount || '?'})\nLobby: *${detectedLobby}*\n\n👉 Apne *Team Name* bhejo:`);
+                } else {
+                    await saveSession(msg.from, { mediaPath: tempFileName, status: resultObj.status, isAuto: resultObj.isAuto, utr, amount, imgHash, state: 'AWAITING_LOBBY', lobbyType: null });
+                    return safeSend(msg.from, `✅ Screenshot mila!\nKaunsi lobby chahiye?\n👉 Type: *${activeMode.map(m => m.toUpperCase()).join(', ')}*`);
+                }
+            } catch (e) {
+                await resetOCRWorker();
+                await saveSession(msg.from, { mediaPath: null, status: '❌ OCR SCAN FAILED', state: 'AWAITING_LOBBY' });
+                try { fs.unlinkSync(tempFileName); } catch(err){}
+                return safeSend(msg.from, `⚠️ Screenshot scan failed. Please type lobby name manually.`);
+            }
+        }
+
+        if (!msg.hasMedia && !isWaitingText && rawText.length > 0) {
+            if (hasDirectIntent) {
+                if (completedUsers.has(msg.from) && !asksQR) return;
+
+                let targetLobby = detectedLobbyIntent ? detectedLobbyIntent.charAt(0).toUpperCase() + detectedLobbyIntent.slice(1) : null;
+                if (!targetLobby && activeMode.length === 1) targetLobby = activeMode[0].charAt(0).toUpperCase() + activeMode[0].slice(1);
+
+                await saveSession(msg.from, { state: 'AWAITING_SS', lobbyType: targetLobby });
+
+                if (targetLobby) {
+                    if (!isSlotsAvailable(targetLobby.toLowerCase())) return safeSend(msg.from, `😔 *${targetLobby} lobby full ho gayi hai!*`);
+                    return await sendLobbyInfo(msg.from, targetLobby);
+                } else {
+                    if (fs.existsSync('./qr.png')) {
+                        const qrImg = MessageMedia.fromFilePath('./qr.png');
+                        let captionText = `👇 *SCAN & PAY*\n⏰ *Lobby Time:* ${settings.lobbyTime}\n\n`;
+                        activeMode.forEach(t => captionText += `🔹 *${t.toUpperCase()}:* ₹${settings[`${t}Price`]}\n`);
+                        captionText += `\nPay karke screenshot bhejein.`;
+                        await safeSend(msg.from, qrImg, { caption: captionText });
+                        setQrReminder(msg.from);
+                    }
+                }
+            }
+        }
+    } catch (e) {
+        log('ERROR', `handleUserMessage error: ${e.message}`);
+    }
+};
+
+// ─────────────────────────────────────────────────────
+//  CRON
+// ─────────────────────────────────────────────────────
+cron.schedule('0 0 * * *', async () => {
+    localRecords = [];
+    try { await DailyRecord.deleteMany({}); await TempSession.deleteMany({}); } catch (e) {}
+    try { fs.readdirSync('./').forEach(f => { if (f.startsWith('temp_') && f.endsWith('.jpg')) fs.unlinkSync(f); }); } catch(e){}
+    settings.closedLobbies = []; saveSettings(); seenUsers.clear(); completedUsers.clear();
+    Object.keys(userQueues).forEach(k => { userQueues[k] = []; }); processingSet.clear();
+    console.log('🧹 Daily reset completed.');
+}, { timezone: 'Asia/Kolkata' });
 
 client.initialize();
