@@ -18,7 +18,7 @@ process.on('uncaughtException',  e => console.error('⚠️ Exception:', e.messa
 // ─────────────────────────────────────────────────────
 const randInt = (min, max) => Math.floor(Math.random() * (max - min + 1)) + min;
 
-const humanDelay = (minMs = 2000, maxMs = 6000) =>
+const humanDelay = (minMs = 500, maxMs = 1500) =>
     new Promise(res => setTimeout(res, randInt(minMs, maxMs)));
 
 const safeSend = async (to, content, options = {}) => {
