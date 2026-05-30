@@ -145,56 +145,70 @@ let activeMode = safeRead('./mode.json', { mode: 'both' }).mode;
 const saveMode = () => safeWrite('./mode.json', { mode: activeMode });
 
 let links = safeRead('./links.json', {
-    mini: 'https://chat.whatsapp.com/xxx',
-    mega: 'https://chat.whatsapp.com/yyy',
-    live: 'https://chat.whatsapp.com/zzz',
-    custom: 'https://chat.whatsapp.com/aaa',
-    solo: 'https://chat.whatsapp.com/bbb',
-    duo: 'https://chat.whatsapp.com/ccc'
+    mini:        'https://chat.whatsapp.com/xxx',
+    mega:        'https://chat.whatsapp.com/yyy',
+    live:        'https://chat.whatsapp.com/zzz',
+    medium:      'https://chat.whatsapp.com/mmm',
+    competitive: 'https://chat.whatsapp.com/ccc',
+    custom:      'https://chat.whatsapp.com/aaa',
+    solo:        'https://chat.whatsapp.com/bbb',
+    duo:         'https://chat.whatsapp.com/ddd'
 });
 const saveLinks = () => safeWrite('./links.json', links);
 
 let settings = safeRead('./settings.json', {
-    scrimName:   'MAG ESPORTS',
-    miniPrice:   '20/25',
-    megaPrice:   '35/45',
-    livePrice:   '55',
-    customPrice: '30',      // NEW: custom lobby price
-    soloPrice:   '15',      // NEW: solo lobby price
-    duoPrice:    '20',      // NEW: duo lobby price
-    lobbyTime:   '9 PM',
-    miniMatches: '4',       // NEW: configurable match counts
-    megaMatches: '6',
-    liveMatches: '6',
-    customMatches: '5',
-    closedLobbies: []
+    scrimName:         'MAG ESPORTS',
+    miniPrice:         '20/25',
+    megaPrice:         '35/45',
+    livePrice:         '55',
+    mediumPrice:       '30/35',
+    competitivePrice:  '50/60',
+    customPrice:       '30',
+    soloPrice:         '15',
+    duoPrice:          '20',
+    lobbyTime:         '9 PM',
+    miniMatches:       '4',
+    megaMatches:       '6',
+    liveMatches:       '6',
+    mediumMatches:     '5',
+    competitiveMatches:'8',
+    customMatches:     '5',
+    closedLobbies:     []
 });
-if (!settings.closedLobbies)  settings.closedLobbies  = [];
-if (!settings.miniMatches)    settings.miniMatches    = '4';
-if (!settings.megaMatches)    settings.megaMatches    = '6';
-if (!settings.liveMatches)    settings.liveMatches    = '6';
-if (!settings.customMatches)  settings.customMatches  = '5';
-if (!settings.customPrice)    settings.customPrice    = '30';
-if (!settings.soloPrice)      settings.soloPrice      = '15';
-if (!settings.duoPrice)       settings.duoPrice       = '20';
+if (!settings.closedLobbies)        settings.closedLobbies        = [];
+if (!settings.miniMatches)          settings.miniMatches          = '4';
+if (!settings.megaMatches)          settings.megaMatches          = '6';
+if (!settings.liveMatches)          settings.liveMatches          = '6';
+if (!settings.mediumMatches)        settings.mediumMatches        = '5';
+if (!settings.competitiveMatches)   settings.competitiveMatches   = '8';
+if (!settings.customMatches)        settings.customMatches        = '5';
+if (!settings.customPrice)          settings.customPrice          = '30';
+if (!settings.soloPrice)            settings.soloPrice            = '15';
+if (!settings.duoPrice)             settings.duoPrice             = '20';
+if (!settings.mediumPrice)          settings.mediumPrice          = '30/35';
+if (!settings.competitivePrice)     settings.competitivePrice     = '50/60';
 const saveSettings = () => safeWrite('./settings.json', settings);
 
 // All valid lobby type names (canonical capitalised form)
-const ALL_LOBBY_TYPES = ['Mini', 'Mega', 'Live', 'Custom', 'Solo', 'Duo'];
+const ALL_LOBBY_TYPES = ['Mini', 'Mega', 'Live', 'Medium', 'Competitive', 'Custom', 'Solo', 'Duo'];
 
 // Which lobby types are included in each mode
 const MODE_LOBBIES = {
-    mini:      ['Mini'],
-    mega:      ['Mega'],
-    live:      ['Live'],
-    both:      ['Mini', 'Mega'],
-    all:       ['Mini', 'Mega', 'Live'],
-    minilive:  ['Mini', 'Live'],
-    custom:    ['Custom'],
-    solo:      ['Solo'],
-    duo:       ['Duo'],
-    solodup:   ['Solo', 'Duo'],
-    full:      ['Mini', 'Mega', 'Live', 'Custom', 'Solo', 'Duo']
+    mini:        ['Mini'],
+    mega:        ['Mega'],
+    live:        ['Live'],
+    medium:      ['Medium'],
+    competitive: ['Competitive'],
+    both:        ['Mini', 'Mega'],
+    all:         ['Mini', 'Mega', 'Live', 'Medium', 'Competitive'],
+    minilive:    ['Mini', 'Live'],
+    minimedium:  ['Mini', 'Medium'],
+    megacomp:    ['Mega', 'Competitive'],
+    custom:      ['Custom'],
+    solo:        ['Solo'],
+    duo:         ['Duo'],
+    solodup:     ['Solo', 'Duo'],
+    full:        ['Mini', 'Mega', 'Live', 'Medium', 'Competitive', 'Custom', 'Solo', 'Duo']
 };
 
 const lobbyInMode = (type) => (MODE_LOBBIES[activeMode] || []).map(t => t.toLowerCase()).includes(type.toLowerCase());
@@ -209,12 +223,14 @@ const OCR_MIN_CONF = 30;
 const getLobbyMeta = (type) => {
     const t = type?.toLowerCase();
     const map = {
-        mini:   { price: settings.miniPrice,   matches: settings.miniMatches,   emoji: '🟡', color: 'MINI'   },
-        mega:   { price: settings.megaPrice,   matches: settings.megaMatches,   emoji: '🔵', color: 'MEGA'   },
-        live:   { price: settings.livePrice,   matches: settings.liveMatches,   emoji: '🔴', color: 'LIVE'   },
-        custom: { price: settings.customPrice, matches: settings.customMatches, emoji: '🟣', color: 'CUSTOM' },
-        solo:   { price: settings.soloPrice,   matches: '4',                   emoji: '⚪', color: 'SOLO'   },
-        duo:    { price: settings.duoPrice,    matches: '4',                   emoji: '🟤', color: 'DUO'    },
+        mini:        { price: settings.miniPrice,        matches: settings.miniMatches,        emoji: '🟡', color: 'MINI'        },
+        mega:        { price: settings.megaPrice,        matches: settings.megaMatches,        emoji: '🔵', color: 'MEGA'        },
+        live:        { price: settings.livePrice,        matches: settings.liveMatches,        emoji: '🔴', color: 'LIVE'        },
+        medium:      { price: settings.mediumPrice,      matches: settings.mediumMatches,      emoji: '🟠', color: 'MEDIUM'      },
+        competitive: { price: settings.competitivePrice, matches: settings.competitiveMatches, emoji: '🏆', color: 'COMPETITIVE' },
+        custom:      { price: settings.customPrice,      matches: settings.customMatches,      emoji: '🟣', color: 'CUSTOM'      },
+        solo:        { price: settings.soloPrice,        matches: '4',                         emoji: '⚪', color: 'SOLO'        },
+        duo:         { price: settings.duoPrice,         matches: '4',                         emoji: '🟤', color: 'DUO'        },
     };
     return map[t] || map['mini'];
 };
@@ -222,6 +238,7 @@ const getLobbyMeta = (type) => {
 const getValidPrices = () => {
     const allPrices = [
         settings.miniPrice, settings.megaPrice, settings.livePrice,
+        settings.mediumPrice, settings.competitivePrice,
         settings.customPrice, settings.soloPrice, settings.duoPrice
     ].join(' ');
     return allPrices.match(/\d+/g) || [];
@@ -236,7 +253,7 @@ const setQrReminder = (userId) => {
         const pData = await TempSession.findOne({ phone: userId });
         if (!pData || pData.state === 'AWAITING_TEAM_NAME') { delete qrReminders[userId]; return; }
         try {
-            await safeSend(userId, `🚨 *FINAL REMINDER!* 🚨\n\nBhai aapne slot manga tha par abhi tak screenshot nahi bheja.\n\n⚡ *Sirf kuch LAST SLOTS bache hain!* ⚡\nJaldi pay karke screenshot bhejo warna aapka slot cancel karke waiting list wali team ko de diya jayega!\n\nFast kro bhai ⏳`);
+            await safeSend(userId, `🚨 *SLOT ABHI SAFE NAHI HAI!* 🚨\n\nBhai tumne lobby select ki thi par payment screenshot abhi tak nahi aayi!\n\n🔥 *Slots bhar rahe hain — waiting list teams ready hain!*\n\n⏳ Abhi pay karo aur screenshot bhejo — warna tumhara slot automatically cancel ho jayega!\n\n_Last chance bhai — jaldi karo!_ ⚡`);
         } catch (e) {}
         delete qrReminders[userId];
     }, 5 * 60 * 1000);
@@ -395,23 +412,43 @@ const isInvalidName = (name) => {
 // ─────────────────────────────────────────────────────
 //  WELCOME MESSAGE — dynamic based on active mode
 // ─────────────────────────────────────────────────────
+// Returns a FOMO urgency label based on remaining slots (exact count hidden)
+const getFomoLabel = (lobbyName) => {
+    const filled  = getSlotCount(lobbyName);
+    const remaining = maxSlots - filled;
+    const pct = filled / maxSlots;
+
+    if (!isSlotsAvailable(lobbyName))  return `🛑 *FULL* — Slot nahi bache!`;
+    if (remaining <= 2)                return `🔥 *ALMOST FULL* — Sirf ${remaining} slot bacha hai! Jaldi karo!`;
+    if (remaining <= 5)                return `⚡ *FILLING FAST* — Bahut kam slots bache hain!`;
+    if (pct >= 0.7)                    return `🚨 *LIMITED SLOTS* — Slots tezi se bhar rahe hain!`;
+    if (pct >= 0.4)                    return `⚠️ *SLOTS FILLING* — Abhi book karo!`;
+    return `✅ *AVAILABLE* — Slot lo abhi!`;
+};
+
 const getWelcomeMessage = () => {
     const activeLobbies = MODE_LOBBIES[activeMode] || [];
-    let msg = `🎮 *${settings.scrimName} — LOBBY REGISTRATION*\n⏰ *Time:* ${settings.lobbyTime}\n━━━━━━━━━━━━━━━━━━━━\n\nKonsi lobby leni hai?\n\n`;
+    let msg = `🎮 *${settings.scrimName} — LOBBY REGISTRATION*\n`;
+    msg += `⏰ *Time:* ${settings.lobbyTime}\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━\n\n`;
+    msg += `⚡ *Slots tezi se bhar rahe hain! Jaldi karo!* ⚡\n\n`;
+
     for (const lobbyName of activeLobbies) {
-        const meta = getLobbyMeta(lobbyName);
+        const meta  = getLobbyMeta(lobbyName);
         const isFull = !isSlotsAvailable(lobbyName);
-        const slots  = getSlotCount(lobbyName);
-        msg += `${meta.emoji} *${lobbyName.toUpperCase()} LOBBY* (${meta.matches} Matches) - `;
-        msg += isFull ? `🛑 *FULL*` : `₹${meta.price}`;
-        msg += ` _(${slots}/${maxSlots})_\n`;
+        msg += `${meta.emoji} *${lobbyName.toUpperCase()} LOBBY* (${meta.matches} Matches)\n`;
+        msg += `   💰 Entry: *₹${meta.price}*\n`;
+        msg += `   ${getFomoLabel(lobbyName)}\n\n`;
     }
-    msg += `\n━━━━━━━━━━━━━━━━━━━━\n👉 `;
+
+    msg += `━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `👉 `;
     if (activeLobbies.length > 1) {
         msg += `*${activeLobbies.join('*, *')}* — koi ek type karo.`;
     } else if (activeLobbies.length === 1) {
         msg += `*${activeLobbies[0]}* likh kar bhejo.`;
     }
+    msg += `\n⚠️ _Slot guaranteed nahi hoga jab tak payment nahi hoti!_`;
     msg += `\n━━━━━━━━━━━━━━━━━━━━`;
     return msg;
 };
@@ -420,9 +457,12 @@ const getWelcomeMessage = () => {
 //  SEND LOBBY INFO  — works for any lobby type
 // ─────────────────────────────────────────────────────
 const sendLobbyInfo = async (to, lobbyType) => {
-    const meta = getLobbyMeta(lobbyType);
+    const meta      = getLobbyMeta(lobbyType);
+    const filled    = getSlotCount(lobbyType);
+    const remaining = maxSlots - filled;
+    const fomoLine  = getFomoLabel(lobbyType);
 
-    // Send promo image if it exists for this lobby type
+    // Send promo image if exists
     const promoImages = [`./promo_${lobbyType.toLowerCase()}.png`, './mega.png'];
     if (['live','custom'].includes(lobbyType.toLowerCase())) {
         for (const img of promoImages) {
@@ -435,13 +475,16 @@ const sendLobbyInfo = async (to, lobbyType) => {
         `⏰ *Time:* ${settings.lobbyTime}\n` +
         `⚔️ *Format:* ${meta.matches} Matches\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
-        `💰 Entry Fee  : *₹${meta.price}*\n` +
+        `💰 Entry Fee : *₹${meta.price}*\n` +
+        `🎯 Status    : ${fomoLine}\n` +
         `━━━━━━━━━━━━━━━━━━━━\n` +
-        `👇 QR scan karke *₹${meta.price}* pay karo aur screenshot bhejo.`
+        `👇 *Abhi pay karo warna slot kisi aur ko mil jayega!*\nQR scan karke *₹${meta.price}* bhejo aur screenshot attach karo.`
     );
 
     if (fs.existsSync('./qr.png')) {
-        await safeSend(to, MessageMedia.fromFilePath('./qr.png'), { caption: `📲 Scan & Pay *₹${meta.price}* → Screenshot bhejo` });
+        await safeSend(to, MessageMedia.fromFilePath('./qr.png'), {
+            caption: `📲 *Scan & Pay ₹${meta.price}*\n⚠️ _Payment ke baad hi slot confirm hoga!_\n\nPay karo → Screenshot bhejo → Done! ✅`
+        });
         setQrReminder(to);
     }
 };
@@ -498,6 +541,12 @@ const detectLobby = (text) => {
 
     // Live keywords
     if (/\blive\b|stream|streaming|on\s*air/.test(t)) return 'Live';
+
+    // Medium keywords
+    if (/\bmedium\b|mid\b|beech\b|madhyam|m3\b|5\s*match/.test(t)) return 'Medium';
+
+    // Competitive keywords
+    if (/\bcompetitive\b|comp\b|pro\b|ranked\b|serious\b|8\s*match|tourney\s*mode/.test(t)) return 'Competitive';
 
     // Custom keywords
     if (/\bcustom\b|customise|customize|special|khas|alag/.test(t)) return 'Custom';
@@ -574,7 +623,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         const parts = rawText.split(/\s+/);
         const targetLobby = parts[1]?.toLowerCase();
         const bcMessage = parts.slice(2).join(' ');
-        if (!targetLobby || !bcMessage) return replyAdmin('⚠️ Usage: .bc <mini/mega/live/custom/solo/duo/all> <Message>');
+        if (!targetLobby || !bcMessage) return replyAdmin('⚠️ Usage: .bc <mini/mega/live/medium/competitive/custom/solo/duo/all> <Message>');
         const records = readRecords();
         let targets = targetLobby === 'all'
             ? records
@@ -611,13 +660,13 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         const parts = rawText.split(/\s+/);
         const type = parts[1]?.toLowerCase();
         const price = parts[2];
-        const priceMap = { mini: 'miniPrice', mega: 'megaPrice', live: 'livePrice', custom: 'customPrice', solo: 'soloPrice', duo: 'duoPrice' };
+        const priceMap = { mini: 'miniPrice', mega: 'megaPrice', live: 'livePrice', medium: 'mediumPrice', competitive: 'competitivePrice', custom: 'customPrice', solo: 'soloPrice', duo: 'duoPrice' };
         if (priceMap[type] && price) {
             settings[priceMap[type]] = price;
             saveSettings();
             return replyAdmin(`✅ ${type.toUpperCase()} price set to ₹${price}`);
         }
-        return replyAdmin('⚠️ Usage: .setprice mini/mega/live/custom/solo/duo <amount>');
+        return replyAdmin('⚠️ Usage: .setprice mini/mega/live/medium/competitive/custom/solo/duo <amount>');
     }
 
     // ── Match count ─────────────────────────────────
@@ -625,13 +674,13 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         const parts = rawText.split(/\s+/);
         const type = parts[1]?.toLowerCase();
         const count = parts[2];
-        const matchMap = { mini: 'miniMatches', mega: 'megaMatches', live: 'liveMatches', custom: 'customMatches' };
+        const matchMap = { mini: 'miniMatches', mega: 'megaMatches', live: 'liveMatches', medium: 'mediumMatches', competitive: 'competitiveMatches', custom: 'customMatches' };
         if (matchMap[type] && count) {
             settings[matchMap[type]] = count;
             saveSettings();
             return replyAdmin(`✅ ${type.toUpperCase()} match count set to ${count}`);
         }
-        return replyAdmin('⚠️ Usage: .setmatches mini/mega/live/custom <count>');
+        return replyAdmin('⚠️ Usage: .setmatches mini/mega/live/medium/competitive/custom <count>');
     }
 
     // ── Links ───────────────────────────────────────
@@ -639,13 +688,13 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         const parts = rawText.split(/\s+/);
         const type = parts[1]?.toLowerCase();
         const linkMatch = rawText.match(/https?:\/\/[^\s]+/i);
-        const validTypes = ['mini', 'mega', 'live', 'custom', 'solo', 'duo'];
+        const validTypes = ['mini', 'mega', 'live', 'medium', 'competitive', 'custom', 'solo', 'duo'];
         if (linkMatch && validTypes.includes(type)) {
             links[type] = linkMatch[0];
             saveLinks();
             return replyAdmin(`✅ *${type.toUpperCase()}* link updated.`);
         }
-        return replyAdmin('⚠️ Usage: .setlink mini/mega/live/custom/solo/duo <link>');
+        return replyAdmin('⚠️ Usage: .setlink mini/mega/live/medium/competitive/custom/solo/duo <link>');
     }
 
     // ── Mode ────────────────────────────────────────
@@ -662,7 +711,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
     // ── Slot open/close ─────────────────────────────
     if (cmd === '.setfull') {
         const type = rawText.split(/\s+/)[1]?.toLowerCase();
-        if (!type) return replyAdmin('⚠️ Usage: .setfull mini/mega/live/custom/solo/duo');
+        if (!type) return replyAdmin('⚠️ Usage: .setfull mini/mega/live/medium/competitive/custom/solo/duo');
         if (!settings.closedLobbies.includes(type)) settings.closedLobbies.push(type);
         saveSettings();
         return replyAdmin(`🛑 *${type.toUpperCase()} Lobby* marked as FULL.`);
@@ -670,7 +719,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
 
     if (cmd === '.setopen') {
         const type = rawText.split(/\s+/)[1]?.toLowerCase();
-        if (!type) return replyAdmin('⚠️ Usage: .setopen mini/mega/live/custom/solo/duo');
+        if (!type) return replyAdmin('⚠️ Usage: .setopen mini/mega/live/medium/competitive/custom/solo/duo');
         settings.closedLobbies = settings.closedLobbies.filter(l => l !== type);
         saveSettings();
         return replyAdmin(`✅ *${type.toUpperCase()} Lobby* is now OPEN.`);
@@ -763,7 +812,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         const parts = rawText.split(/\s+/);
         const lobbyType = parts[1]?.toLowerCase();
         const teamNameToRemove = parts.slice(2).join(' ').trim();
-        if (!lobbyType || !teamNameToRemove) return replyAdmin('⚠️ Usage: .remove mini/mega/live/custom/solo/duo <team name>');
+        if (!lobbyType || !teamNameToRemove) return replyAdmin('⚠️ Usage: .remove mini/mega/live/medium/competitive/custom/solo/duo <team name>');
         const before = localRecords.length;
         localRecords = localRecords.filter(r =>
             !(r.lobbyType?.toLowerCase() === lobbyType && r.teamName.toLowerCase().trim() === teamNameToRemove.toLowerCase().trim())
@@ -811,12 +860,14 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
     if (cmd === '.prices') {
         return replyAdmin(
             `💰 *CURRENT PRICES*\n━━━━━━━━━━━━━━━\n` +
-            `🟡 Mini   : ₹${settings.miniPrice} (${settings.miniMatches} matches)\n` +
-            `🔵 Mega   : ₹${settings.megaPrice} (${settings.megaMatches} matches)\n` +
-            `🔴 Live   : ₹${settings.livePrice} (${settings.liveMatches} matches)\n` +
-            `🟣 Custom : ₹${settings.customPrice} (${settings.customMatches} matches)\n` +
-            `⚪ Solo   : ₹${settings.soloPrice}\n` +
-            `🟤 Duo    : ₹${settings.duoPrice}\n` +
+            `🟡 Mini        : ₹${settings.miniPrice} (${settings.miniMatches} matches)\n` +
+            `🔵 Mega        : ₹${settings.megaPrice} (${settings.megaMatches} matches)\n` +
+            `🔴 Live        : ₹${settings.livePrice} (${settings.liveMatches} matches)\n` +
+            `🟠 Medium      : ₹${settings.mediumPrice} (${settings.mediumMatches} matches)\n` +
+            `🏆 Competitive : ₹${settings.competitivePrice} (${settings.competitiveMatches} matches)\n` +
+            `🟣 Custom      : ₹${settings.customPrice} (${settings.customMatches} matches)\n` +
+            `⚪ Solo        : ₹${settings.soloPrice}\n` +
+            `🟤 Duo         : ₹${settings.duoPrice}\n` +
             `━━━━━━━━━━━━━━━\nTime: ${settings.lobbyTime}`
         );
     }
@@ -886,13 +937,15 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
 const handleUserMessage = async (msg, rawText, textLower) => {
     try {
         const extractNumbers = (str) => (String(str).match(/\d+/g) || []);
-        const miniPrices   = extractNumbers(settings.miniPrice);
-        const megaPrices   = extractNumbers(settings.megaPrice);
-        const livePrices   = extractNumbers(settings.livePrice);
-        const customPrices = extractNumbers(settings.customPrice);
-        const soloPrices   = extractNumbers(settings.soloPrice);
-        const duoPrices    = extractNumbers(settings.duoPrice);
-        const allPrices    = [...miniPrices, ...megaPrices, ...livePrices, ...customPrices, ...soloPrices, ...duoPrices];
+        const miniPrices        = extractNumbers(settings.miniPrice);
+        const megaPrices        = extractNumbers(settings.megaPrice);
+        const livePrices        = extractNumbers(settings.livePrice);
+        const mediumPrices      = extractNumbers(settings.mediumPrice);
+        const competitivePrices = extractNumbers(settings.competitivePrice);
+        const customPrices      = extractNumbers(settings.customPrice);
+        const soloPrices        = extractNumbers(settings.soloPrice);
+        const duoPrices         = extractNumbers(settings.duoPrice);
+        const allPrices         = [...miniPrices, ...megaPrices, ...livePrices, ...mediumPrices, ...competitivePrices, ...customPrices, ...soloPrices, ...duoPrices];
         const textHasNumber = (pricesArr, text) => pricesArr.some(p => new RegExp(`\\b${p}\\b`).test(text));
 
         const pData = await TempSession.findOne({ phone: msg.from });
@@ -902,21 +955,28 @@ const handleUserMessage = async (msg, rawText, textLower) => {
         const detectedKeyword = detectLobby(textLower);
         let wantsLobby = (detectedKeyword && lobbyInMode(detectedKeyword)) ? detectedKeyword : null;
 
-        // Numeric shortcuts: 1=first active, 2=second, 3=third
+        // Numeric shortcuts: 1=first active, 2=second, 3=third ... up to 8
         const activeLobbies = MODE_LOBBIES[activeMode] || [];
         if (!wantsLobby && textLower === '1' && activeLobbies[0]) wantsLobby = activeLobbies[0];
         if (!wantsLobby && textLower === '2' && activeLobbies[1]) wantsLobby = activeLobbies[1];
         if (!wantsLobby && textLower === '3' && activeLobbies[2]) wantsLobby = activeLobbies[2];
+        if (!wantsLobby && textLower === '4' && activeLobbies[3]) wantsLobby = activeLobbies[3];
+        if (!wantsLobby && textLower === '5' && activeLobbies[4]) wantsLobby = activeLobbies[4];
+        if (!wantsLobby && textLower === '6' && activeLobbies[5]) wantsLobby = activeLobbies[5];
+        if (!wantsLobby && textLower === '7' && activeLobbies[6]) wantsLobby = activeLobbies[6];
+        if (!wantsLobby && textLower === '8' && activeLobbies[7]) wantsLobby = activeLobbies[7];
 
         // Price-number detection — map amount back to lobby type
         if (!wantsLobby) {
             const priceDetect = [
-                { prices: miniPrices,   lobby: 'Mini',   mode: ['all','both','mini','minilive'] },
-                { prices: megaPrices,   lobby: 'Mega',   mode: ['all','both','mega'] },
-                { prices: livePrices,   lobby: 'Live',   mode: ['all','live','minilive'] },
-                { prices: customPrices, lobby: 'Custom', mode: ['all','custom','full'] },
-                { prices: soloPrices,   lobby: 'Solo',   mode: ['all','solo','solodup','full'] },
-                { prices: duoPrices,    lobby: 'Duo',    mode: ['all','duo','solodup','full'] },
+                { prices: miniPrices,        lobby: 'Mini',        mode: ['all','both','mini','minilive','minimedium'] },
+                { prices: megaPrices,        lobby: 'Mega',        mode: ['all','both','mega','megacomp'] },
+                { prices: livePrices,        lobby: 'Live',        mode: ['all','live','minilive'] },
+                { prices: mediumPrices,      lobby: 'Medium',      mode: ['all','medium','minimedium','full'] },
+                { prices: competitivePrices, lobby: 'Competitive', mode: ['all','competitive','megacomp','full'] },
+                { prices: customPrices,      lobby: 'Custom',      mode: ['all','custom','full'] },
+                { prices: soloPrices,        lobby: 'Solo',        mode: ['all','solo','solodup','full'] },
+                { prices: duoPrices,         lobby: 'Duo',         mode: ['all','duo','solodup','full'] },
             ];
             for (const pd of priceDetect) {
                 if (textHasNumber(pd.prices, textLower) && pd.mode.includes(activeMode)) {
@@ -995,12 +1055,14 @@ const handleUserMessage = async (msg, rawText, textLower) => {
                 let detectedLobby = null;
                 if (amount) {
                     const priceDetect = [
-                        { prices: miniPrices,   lobby: 'Mini',   mode: ['all','both','mini','minilive'] },
-                        { prices: megaPrices,   lobby: 'Mega',   mode: ['all','both','mega'] },
-                        { prices: livePrices,   lobby: 'Live',   mode: ['all','live','minilive'] },
-                        { prices: customPrices, lobby: 'Custom', mode: ['all','custom','full'] },
-                        { prices: soloPrices,   lobby: 'Solo',   mode: ['all','solo','solodup','full'] },
-                        { prices: duoPrices,    lobby: 'Duo',    mode: ['all','duo','solodup','full'] },
+                        { prices: miniPrices,        lobby: 'Mini',        mode: ['all','both','mini','minilive','minimedium'] },
+                        { prices: megaPrices,        lobby: 'Mega',        mode: ['all','both','mega','megacomp'] },
+                        { prices: livePrices,        lobby: 'Live',        mode: ['all','live','minilive'] },
+                        { prices: mediumPrices,      lobby: 'Medium',      mode: ['all','medium','minimedium','full'] },
+                        { prices: competitivePrices, lobby: 'Competitive', mode: ['all','competitive','megacomp','full'] },
+                        { prices: customPrices,      lobby: 'Custom',      mode: ['all','custom','full'] },
+                        { prices: soloPrices,        lobby: 'Solo',        mode: ['all','solo','solodup','full'] },
+                        { prices: duoPrices,         lobby: 'Duo',         mode: ['all','duo','solodup','full'] },
                     ];
                     for (const pd of priceDetect) {
                         if (pd.prices.includes(String(amount)) && pd.mode.includes(activeMode)) {
