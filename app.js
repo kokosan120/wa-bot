@@ -2,7 +2,10 @@ const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
 const Tesseract = require('tesseract.js');
-
+const express = require('express');
+const app = express();
+app.get('/', (req, res) => res.send('Bot is Alive!'));
+app.listen(7860, () => console.log('Dummy server running on port 7860'));
 process.on('unhandledRejection', e => console.error('⚠️ Rejection:', e.message));
 process.on('uncaughtException',  e => console.error('⚠️ Exception:', e.message));
 
