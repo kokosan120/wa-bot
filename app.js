@@ -1,8 +1,7 @@
 const express = require('express');
-const app = report || express();
+const app = express();
 app.get('/', (req, res) => res.send('MAG Bot is running!'));
 app.listen(process.env.PORT || 7860, () => console.log('Web server is ready!'));
-
 const { Client, LocalAuth, MessageMedia } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
 const fs = require('fs');
