@@ -55,9 +55,15 @@ const drainQueue = async (userId) => {
     if (processingSet.has(userId)) return;
     processingSet.add(userId);
     while (userQueues[userId] && userQueues[userId].length > 0) {
+        // ── Activity gate ────────────────────────────────
+        // Before processing each queued message, check if the user
+        // is still within the active window. If they went idle between
+        // queueing and processing, silently discard the reply.
+        // This prevents the bot from DMing people who messaged long ago
+        // and are no longer waiting — a key anti-spam signal for WA.
         if (!isUserActive(userId)) {
             log('INFO', `Skipped reply to ${userId} — user no longer active (window: ${ACTIVE_WINDOW/1000}s)`);
-            userQueues[userId] = []; 
+            userQueues[userId] = [];  // flush remaining queue for this idle user
             break;
         }
         const fn = userQueues[userId].shift();
@@ -118,8 +124,14 @@ const completedUsers = new Set();
 const qrReminders    = {};
 let maxSlots         = 24;
 
-const lastActiveMap = {};                  
-let   ACTIVE_WINDOW = 30 * 1000;          
+// ── Activity Tracker ─────────────────────────────────
+// Tracks the last time each user sent a message (Unix ms).
+// Bot will only DM/reply users who have been active within
+// the configured ACTIVE_WINDOW. Users who messaged long ago
+// and are now idle won't get spammed — protecting both the
+// user experience and the account from spam-filter triggers.
+const lastActiveMap = {};                  // { userId: timestamp_ms }
+let   ACTIVE_WINDOW = 30 * 1000;          // default: 30 seconds (configurable via .setwindow)
 
 const touchActive  = (userId) => { lastActiveMap[userId] = Date.now(); };
 const isUserActive = (userId) => {
@@ -146,7 +158,7 @@ let links = safeRead('./links.json', {
 const saveLinks = () => safeWrite('./links.json', links);
 
 let settings = safeRead('./settings.json', {
-    scrimName:         'BS Esports Scrims',
+    scrimName:         'MAG ESPORTS',
     miniPrice:         '20/25',
     megaPrice:         '35/45',
     livePrice:         '55',
@@ -178,35 +190,39 @@ if (!settings.mediumPrice)          settings.mediumPrice          = '30/35';
 if (!settings.competitivePrice)     settings.competitivePrice     = '50/60';
 const saveSettings = () => safeWrite('./settings.json', settings);
 
+// All valid lobby type names (canonical capitalised form)
 const ALL_LOBBY_TYPES = ['Mini', 'Mega', 'Live', 'Medium', 'Competitive', 'Custom', 'Solo', 'Duo'];
 
+// Which lobby types are included in each mode
 const MODE_LOBBIES = {
-    mini:        ['Mini'],
-    mega:        ['Mega'],
-    live:        ['Live'],
-    medium:      ['Medium'],
-    competitive: ['Competitive'],
-    both:        ['Mini', 'Mega'],
-    all:         ['Mini', 'Mega', 'Live', 'Medium', 'Competitive'],
-    minilive:    ['Mini', 'Live'],
-    minimedium:  ['Mini', 'Medium'],
-    minicomp:    ['Mini', 'Competitive'],
-    mediumcomp:  ['Medium', 'Competitive'],
-    megacomp:    ['Mega', 'Competitive'],
-    custom:      ['Custom'],
-    solo:        ['Solo'],
-    duo:         ['Duo'],
-    solodup:     ['Solo', 'Duo'],
-    full:        ['Mini', 'Mega', 'Live', 'Medium', 'Competitive', 'Custom', 'Solo', 'Duo']
+    mini:             ['Mini'],
+    mega:             ['Mega'],
+    live:             ['Live'],
+    medium:           ['Medium'],
+    competitive:      ['Competitive'],
+    both:             ['Mini', 'Mega'],
+    all:              ['Mini', 'Mega', 'Live', 'Medium', 'Competitive'],
+    minilive:         ['Mini', 'Live'],
+    minimedium:       ['Mini', 'Medium'],
+    megacomp:         ['Mega', 'Competitive'],
+    minimediumcomp:   ['Mini', 'Medium', 'Competitive'],
+    minimediumlive:   ['Mini', 'Medium', 'Live'],
+    megamediumcomp:   ['Mega', 'Medium', 'Competitive'],
+    custom:           ['Custom'],
+    solo:             ['Solo'],
+    duo:              ['Duo'],
+    solodup:          ['Solo', 'Duo'],
+    full:             ['Mini', 'Mega', 'Live', 'Medium', 'Competitive', 'Custom', 'Solo', 'Duo']
 };
 
 const lobbyInMode = (type) => (MODE_LOBBIES[activeMode] || []).map(t => t.toLowerCase()).includes(type.toLowerCase());
 
-const MAG_UPI_IDS = ['3dpkzqyhz1@postbank', 'shivon shgal', 'shivon', 'shgal', 'bs esports', 'bs esports crims'];
+const MAG_UPI_IDS = ['8823827920@okbizaxis', '8823827920', 'mag esports', 'magesports', 'mag_esports',
+                     'mac esports', 'maq esports', '882382792o', 'chetan bhul', 'chetan'];
 const OCR_MIN_CONF = 30;
 
 // ─────────────────────────────────────────────────────
-//  LOBBY META HELPER
+//  LOBBY META HELPER — single source of truth
 // ─────────────────────────────────────────────────────
 const getLobbyMeta = (type) => {
     const t = type?.toLowerCase();
@@ -266,33 +282,22 @@ const isSlotsAvailable = (type) => {
 
 const saveRecord = (teamName, number, lobbyType, utr = 'N/A', amount = 'N/A', imgHash = 'N/A') => {
     const istTimestamp = new Date().toLocaleString('en-IN', { timeZone: 'Asia/Kolkata' });
-    let cleanNum = String(number).replace(/\D/g, '');
-    if (cleanNum.length > 10) cleanNum = cleanNum.slice(-10);
-    
-    // ✅ Plus (+) hata diya gaya hai. Ab seedha 919876543210 banega
-    const finalNumber = `91${cleanNum}`;
-    
+
+    // Normalize to clean 10-digit Indian number → store as +91XXXXXXXXXX
+    let clean = String(number).replace(/\D/g, '');
+    if (clean.length === 12 && clean.startsWith('91')) clean = clean.slice(2);
+    if (clean.length > 10) clean = clean.slice(-10);
+    const finalNumber = clean.length === 10 ? `+91${clean}` : `+${clean}`;
+
     const doc = { teamName, number: finalNumber, lobbyType, utr, amount, imgHash, timestamp: istTimestamp };
     localRecords.push(doc);
-    new DailyRecord(doc).save().then(() => {
-        console.log('✅ Database saved successfully - Number:', finalNumber);
-    }).catch(e => {
-        log('ERROR', 'MongoDB Save Error: ' + e);
-    });
+    new DailyRecord(doc).save().catch(e => log('ERROR', 'MongoDB Save Error: ' + e));
 };
 
 const removeRecord = (number) => {
-    let numStr = String(number).replace(/\D/g, '');
-    if (numStr.length > 10) numStr = numStr.slice(-10);
-    
-    // ✅ Plus (+) yahan se bhi hata diya
-    const formatted = `91${numStr}`;
-    
-    localRecords = localRecords.filter(r => {
-        const rNum = String(r.number).replace(/\D/g, '');
-        return rNum !== numStr && r.number !== formatted && r.number !== `+91${numStr}`; // Backup in case old format exists
-    });
-    DailyRecord.deleteMany({ $or: [{ number: formatted }, { number: `+91${numStr}` }, { number: numStr }] }).catch(e => log('ERROR', 'DB Del Error: ' + e));
+    const numStr = String(number).startsWith('+') ? number : `+${number}`;
+    localRecords = localRecords.filter(r => r.number !== numStr && r.number !== number);
+    DailyRecord.deleteMany({ $or: [{ number: numStr }, { number: number }] }).catch(e => log('ERROR', 'DB Del Error: ' + e));
 };
 
 const isDuplicateUTR  = (utr)  => { if (!utr || utr === 'N/A') return false; return readRecords().some(r => r.utr === utr); };
@@ -408,30 +413,22 @@ const analyzeOCR = (rawText, utr, amount) => {
 
 const isInvalidName = (name) => {
     const lower = name.toLowerCase().trim();
-    if (lower.length < 2 || lower.length > 25) return true;
-    const bannedWords = [
-        'hi', 'hello', 'hey', 'hola', 'namaste', 'ok', 'okay', 'done', 'yes', 'no', 'yeah', 'yup', 'nope', 'sure',
-        'ha', 'hmm', 'hm', 'lol', 'haha', 'bhai', 'bro', 'dude', 'yaar', 'qr', 'pay', 'payment', 'ss', 'screenshot', 
-        'upi', 'transfer', 'utr', 'receipt', 'mera', 'team', 'naam', 'name', 'slot', 'book', 'jaldi', 'please', 'plz', 
-        'thanks', 'mini', 'mega', 'live', 'custom', 'solo', 'duo', 'medium', 'competitive', 'full', 'ho gya', 'ho gaya', 
-        'karo', 'krdo', 'bhejo', 'send', 'wait', 'stop', 'asdf', 'qwer', 'zxcv', '1234', '123456', 'abcd', 'qwerty'
-    ];
-    if (bannedWords.includes(lower)) return true;
-    if (/^[\d\s\W_]+$/.test(lower)) return true;
-    if (/^(.)\1{2,}$/.test(lower)) return true;
-    const gibberishPatterns = /^(asdf|qwer|zxcv|qazwsx|asdfgh|qwerty|1234|123456)+$/i;
-    if (gibberishPatterns.test(lower)) return true;
-    if (!/[a-z]{2,}/i.test(lower)) return true;
+    const bad = ['ok','done','yes','ha','hmm','ho gaya','hi','hello','bhai','bro','qr','pay',
+                 'payment','ss','screenshot','mera','slot','book','jaldi','please','plz',
+                 'team','naam','name','mini','mega','live','custom','solo','duo'];
+    if (lower.length < 2 || bad.includes(lower) || /^[\d\s\W_]+$/.test(lower) || /^(.)\1{2,}$/.test(lower)) return true;
     return false;
 };
 
 // ─────────────────────────────────────────────────────
-//  WELCOME MESSAGE
+//  WELCOME MESSAGE — dynamic based on active mode
 // ─────────────────────────────────────────────────────
+// Returns a FOMO urgency label based on remaining slots (exact count hidden)
 const getFomoLabel = (lobbyName) => {
     const filled  = getSlotCount(lobbyName);
     const remaining = maxSlots - filled;
     const pct = filled / maxSlots;
+
     if (!isSlotsAvailable(lobbyName))  return `🛑 *FULL* — Slot nahi bache!`;
     if (remaining <= 2)                return `🔥 *ALMOST FULL* — Sirf ${remaining} slot bacha hai! Jaldi karo!`;
     if (remaining <= 5)                return `⚡ *FILLING FAST* — Bahut kam slots bache hain!`;
@@ -449,6 +446,7 @@ const getWelcomeMessage = () => {
 
     for (const lobbyName of activeLobbies) {
         const meta  = getLobbyMeta(lobbyName);
+        const isFull = !isSlotsAvailable(lobbyName);
         msg += `${meta.emoji} *${lobbyName.toUpperCase()} LOBBY* (${meta.matches} Matches)\n`;
         msg += `   💰 Entry: *₹${meta.price}*\n`;
         msg += `   ${getFomoLabel(lobbyName)}\n\n`;
@@ -467,12 +465,15 @@ const getWelcomeMessage = () => {
 };
 
 // ─────────────────────────────────────────────────────
-//  SEND LOBBY INFO
+//  SEND LOBBY INFO  — works for any lobby type
 // ─────────────────────────────────────────────────────
 const sendLobbyInfo = async (to, lobbyType) => {
     const meta      = getLobbyMeta(lobbyType);
+    const filled    = getSlotCount(lobbyType);
+    const remaining = maxSlots - filled;
     const fomoLine  = getFomoLabel(lobbyType);
 
+    // Send promo image if exists
     const promoImages = [`./promo_${lobbyType.toLowerCase()}.png`, './mega.png'];
     if (['live','custom'].includes(lobbyType.toLowerCase())) {
         for (const img of promoImages) {
@@ -511,64 +512,12 @@ const sendAdminMedia = async (mediaPath, caption) => {
     try { await client.sendMessage(adminId, `⚠️ [SCREENSHOT NOT FOUND]\n\n${caption}`); } catch(err) {}
 };
 
-// ─────────────────────────────────────────────────────
-//  NEW GET REAL NUMBER LOGIC (Tier 1 to 4)
-// ─────────────────────────────────────────────────────
-const getRealNumber = async (msg) => {
-    // Tier 1: contact.number (most reliable)
-    try {
-        const contact = await msg.getContact();
-        if (contact?.number) {
-            let num = String(contact.number).replace(/\D/g, '');
-            if (num.startsWith('91') && num.length === 12) num = num.slice(2);
-            if (num.length === 10 && /^[6-9]/.test(num)) return num;
-        }
-    } catch (e) {}
-
-    // Tier 2: contact.id._serialized try karo
-    try {
-        const contact = await msg.getContact();
-        const serial = contact?.id?._serialized || '';
-        if (serial.includes('@c.us')) {
-            let num = serial.split('@')[0].replace(/\D/g, '');
-            if (num.startsWith('91') && num.length === 12) num = num.slice(2);
-            if (num.length === 10 && /^[6-9]/.test(num)) return num;
-        }
-    } catch (e) {}
-
-    // Tier 3: msg.from (agar @c.us format hai)
-    try {
-        if (msg.from?.includes('@c.us')) {
-            let num = msg.from.split('@')[0].replace(/\D/g, '');
-            if (num.startsWith('91') && num.length === 12) num = num.slice(2);
-            if (num.length === 10 && /^[6-9]/.test(num)) return num;
-        }
-    } catch (e) {}
-
-    // Tier 4: _data fields
-    try {
-        const rawNum = msg._data?.author || msg._data?.from || '';
-        if (rawNum.includes('@c.us')) {
-            let num = rawNum.split('@')[0].replace(/\D/g, '');
-            if (num.startsWith('91') && num.length === 12) num = num.slice(2);
-            num = num.slice(-10);
-            if (num.length === 10 && /^[6-9]/.test(num)) return num;
-        }
-    } catch (e) {}
-
-    // Fallback: jo bhi mile
-    log('WARN', `Real number extract nahi hua: ${msg.from}`);
-    return msg.from.split('@')[0].replace(/\D/g, '').slice(-10);
-};
-
-const processVerification = async (msg, teamName, lobbyType, paymentData, manualNumber = null) => {
+const processVerification = async (msg, teamName, lobbyType, paymentData) => {
     const { mediaPath, status, utr, amount, imgHash, isAuto } = paymentData;
-    const cleanNumber = manualNumber || await getRealNumber(msg);
+    const cleanNumber = await getRealNumber(msg);
     const rawId = msg.from;
     const link  = links[lobbyType.toLowerCase()] || links.mini;
-    
-    // ✅ Yahan se '+' hata diya gaya hai. Ab seedha 91.. jayega
-    const adminDetails = `Team: *${teamName}*\nLobby: *${lobbyType}*\nNumber: 91${cleanNumber}\nID: ${rawId}\nUTR: ${utr || 'Not found'}\nAmount: ₹${amount || 'null'}`;
+    const adminDetails = `Team: *${teamName}*\nLobby: *${lobbyType}*\nNumber: +${cleanNumber}\nID: ${rawId}\nUTR: ${utr || 'Not found'}\nAmount: ₹${amount || 'null'}`;
 
     if (isAuto || status === '✅ AUTO-VERIFIED') {
         if (isDuplicateUTR(utr)) {
@@ -584,71 +533,232 @@ const processVerification = async (msg, teamName, lobbyType, paymentData, manual
     }
 };
 
+const getRealNumber = async (msg) => {
+    // Tier 1: contact.number (most reliable)
+    try {
+        const contact = await msg.getContact();
+        if (contact?.number) {
+            let num = String(contact.number).replace(/\D/g, '');
+            if (num.startsWith('91') && num.length === 12) num = num.slice(2);
+            if (num.length === 10 && /^[6-9]/.test(num)) return num;
+        }
+    } catch (e) {}
+    // Tier 2: pushname se nahi, _data.notifyName ignore karo
+    // contact.id._serialized try karo
+    try {
+        const contact = await msg.getContact();
+        const serial = contact?.id?._serialized || '';
+        if (serial.includes('@c.us')) {
+            let num = serial.split('@')[0].replace(/\D/g, '');
+            if (num.startsWith('91') && num.length === 12) num = num.slice(2);
+            if (num.length === 10 && /^[6-9]/.test(num)) return num;
+        }
+    } catch (e) {}
+    // Tier 3: msg.from (agar @c.us format hai)
+    try {
+        if (msg.from?.includes('@c.us')) {
+            let num = msg.from.split('@')[0].replace(/\D/g, '');
+            if (num.startsWith('91') && num.length === 12) num = num.slice(2);
+            if (num.length === 10 && /^[6-9]/.test(num)) return num;
+        }
+    } catch (e) {}
+    // Tier 4: _data fields
+    try {
+        const rawNum = msg._data?.author || msg._data?.from || '';
+        if (rawNum.includes('@c.us')) {
+            let num = rawNum.split('@')[0].replace(/\D/g, '');
+            if (num.startsWith('91') && num.length === 12) num = num.slice(2);
+            num = num.slice(-10);
+            if (num.length === 10 && /^[6-9]/.test(num)) return num;
+        }
+    } catch (e) {}
+    // Fallback: jo bhi mile
+    log('WARN', `Real number extract nahi hua: ${msg.from}`);
+    return msg.from.split('@')[0].replace(/\D/g, '').slice(-10);
+};
+
 // ─────────────────────────────────────────────────────
-//  KEYWORD DETECTION
+//  KEYWORD DETECTION — expanded Hindi + English + Hinglish
 // ─────────────────────────────────────────────────────
 const detectLobby = (text) => {
     const t = text.toLowerCase();
+
+    // Mini keywords
     if (/\bmini\b|chota|chhota|cheap|sasta|m1\b|4\s*match/.test(t)) return 'Mini';
+
+    // Mega keywords
     if (/\bmega\b|bada|m2\b|6\s*match/.test(t)) return 'Mega';
+
+    // Live keywords
     if (/\blive\b|stream|streaming|on\s*air/.test(t)) return 'Live';
+
+    // Medium keywords
     if (/\bmedium\b|mid\b|beech\b|madhyam|m3\b|5\s*match/.test(t)) return 'Medium';
+
+    // Competitive keywords
     if (/\bcompetitive\b|comp\b|pro\b|ranked\b|serious\b|8\s*match|tourney\s*mode/.test(t)) return 'Competitive';
+
+    // Custom keywords
     if (/\bcustom\b|customise|customize|special|khas|alag/.test(t)) return 'Custom';
+
+    // Solo keywords
     if (/\bsolo\b|single|akela|alone|1v1|ek\s*banda/.test(t)) return 'Solo';
+
+    // Duo keywords
     if (/\bduo\b|double|dono|pair|2\s*banda|2v2/.test(t)) return 'Duo';
+
     return null;
 };
 
 // ─────────────────────────────────────────────────────
 //  WHATSAPP NATIVE PAY HANDLER
+//  Security layers:
+//  1. msg.type === 'payment'         — real WA payment object only
+//  2. payData present                — actual payload must exist
+//  3. status === completed/success   — only settled payments
+//  4. !msg.fromMe                    — must be incoming, not outgoing
+//  5. receiverWaId === bot number    — anti-spoofing check
+//  6. currency === INR               — only Indian Rupee accepted
+//  7. amount > 0 and parseable       — valid non-zero amount
+//  8. duplicate txnId blocked        — same payment can't register twice
 // ─────────────────────────────────────────────────────
+
 const handleWhatsAppPay = async (msg) => {
     try {
         if (msg.type !== 'payment') return false;
-        const payData = msg._data?.paymentInfo || msg.rawData?.paymentInfo || null;
 
+        // ── Try all known payload locations ─────────────────────────
+        const payData =
+            msg._data?.paymentInfo         ||
+            msg.rawData?.paymentInfo       ||
+            msg._data?.payment             ||
+            msg.rawData?.payment           ||
+            msg._data?.message?.paymentMessage ||
+            msg.rawData?.message?.paymentMessage ||
+            null;
+
+        const adminId   = client.info.wid.user + '@c.us';
+        const botNumber = client.info.wid.user;
+
+        // ── LAYER 2: Payload must exist ───────────────────────────────
         if (!payData) {
-            const adminId = client.info.wid.user + '@c.us';
-            await client.sendMessage(adminId, `⚠️ *WA PAY ALERT*\nPayment object received but data missing.\nFrom: ${msg.from}\nManual check karo.`);
+            log('WARN', `WA Pay: paymentInfo missing — ID: ${msg.id?.id}, from: ${msg.from}`);
+            log('DEBUG', `WA Pay raw _data keys: ${Object.keys(msg._data || {}).join(', ')}`);
+            await client.sendMessage(adminId,
+                `⚠️ *WA PAY — DATA MISSING*\nFrom: ${msg.from}\nMsg ID: ${msg.id?.id || 'N/A'}\n\nPayload nahi mila. Manual check karo.`
+            );
+            await safeSend(msg.from, `✅ Payment signal mila! Admin manually verify karega.\nThoda wait karo. 🙏`);
             return true;
         }
 
-        const status = String(payData.status || '').toLowerCase();
-        const isSuccessful = ['completed', 'successful', 'payment_complete'].includes(status);
+        log('INFO', `WA Pay payData keys: ${Object.keys(payData).join(', ')}`);
+
+        // ── LAYER 3: Status must be successful ───────────────────────
+        const rawStatus = String(payData.status || payData.paymentStatus || '').toLowerCase().trim();
+        const isSuccessful = [
+            'completed', 'successful', 'payment_complete',
+            'transferred', 'success', 'done', 'settled'
+        ].includes(rawStatus);
 
         if (!isSuccessful) {
-            await safeSend(msg.from, `⚠️ Payment status: *${payData.status || 'unknown'}*\nSirf *SUCCESSFUL* payment accept hoti hai.\nAgar payment cut ho gayi hai, admin se contact karo.`);
+            log('INFO', `WA Pay: Rejected — status='${rawStatus}' from ${msg.from}`);
+            await safeSend(msg.from,
+                `⚠️ *Payment Status: ${payData.status || rawStatus || 'Unknown'}*\n\n` +
+                `Sirf *COMPLETED/SUCCESSFUL* payment accept hoti hai.\n` +
+                `Agar payment fail ya pending hai, dobara try karo ya admin se contact karo.`
+            );
             return true;
         }
 
-        if (msg.fromMe) return true;
-
-        const botNumber = client.info.wid.user;
-        if (payData.receiverWaId && !String(payData.receiverWaId).includes(botNumber)) {
-            const adminId = client.info.wid.user + '@c.us';
-            await client.sendMessage(adminId, `🚨 *WA PAY SECURITY ALERT*\nPayment receiver mismatch!\nFrom: ${msg.from}\nReceiver in payload: ${payData.receiverWaId}\nBot number: ${botNumber}\n\nManual investigation required.`);
+        // ── LAYER 4: Must be incoming (not bot's own outgoing payment) ─
+        if (msg.fromMe) {
+            log('INFO', `WA Pay: Ignored — outgoing payment sent by bot.`);
             return true;
         }
 
+        // ── LAYER 5: Receiver must be this bot ──────────────────────
+        const receiverRaw = String(payData.receiverWaId || payData.receiver || payData.to || '');
+        if (receiverRaw && !receiverRaw.includes(botNumber)) {
+            log('WARN', `WA Pay: Receiver mismatch — got '${receiverRaw}', expected '${botNumber}'`);
+            await client.sendMessage(adminId,
+                `🚨 *WA PAY SECURITY ALERT*\n` +
+                `Receiver mismatch — possible spoofing!\n` +
+                `From: ${msg.from}\n` +
+                `Payload receiver: ${receiverRaw}\n` +
+                `Bot number: ${botNumber}\n\n` +
+                `Do NOT approve without manual UPI verification.`
+            );
+            return true;
+        }
+
+        // ── LAYER 6: Currency must be INR ────────────────────────────
+        const currency = String(payData.currency || payData.currencyCode || 'INR').toUpperCase().trim();
+        if (currency && currency !== 'INR') {
+            log('WARN', `WA Pay: Non-INR currency — '${currency}' from ${msg.from}`);
+            await client.sendMessage(adminId,
+                `⚠️ *WA PAY — WRONG CURRENCY*\nFrom: ${msg.from}\nCurrency: ${currency}\n\nSirf INR accept hai.`
+            );
+            await safeSend(msg.from,
+                `⚠️ Payment currency *${currency}* accept nahi hoti.\nSirf *Indian Rupee (INR)* chalega.`
+            );
+            return true;
+        }
+
+        // ── LAYER 7: Extract & normalise amount ──────────────────────
+        // WA Pay exposes amount in different formats across versions:
+        //   • Paise (integer): 2500 = ₹25
+        //   • Rupees (float):  25.00 = ₹25
+        //   • String:         "25" or "2500"
+        // Heuristic: if raw > (max valid price × 10) → treat as paise
         let paidAmount = null;
-        if (payData.amount != null) {
-            const raw = parseFloat(payData.amount);
-            const maxValidPrice = Math.max(...getValidPrices().map(Number));
-            paidAmount = raw > maxValidPrice * 10 ? Math.round(raw / 100) : Math.round(raw);
+        const rawAmount = payData.amount ?? payData.totalAmount ?? payData.value ?? null;
+
+        if (rawAmount != null) {
+            const raw = parseFloat(String(rawAmount).replace(/,/g, ''));
+            if (!isNaN(raw) && raw > 0) {
+                const validNums   = getValidPrices().map(Number);
+                const maxPrice    = Math.max(...validNums);
+                // If raw is more than 10× the highest valid price → likely paise
+                paidAmount = raw > maxPrice * 10 ? Math.round(raw / 100) : Math.round(raw);
+            }
         }
 
-        const validPrices = getValidPrices();
-        const amountStr   = String(paidAmount);
-        const amountMatches = paidAmount !== null && validPrices.includes(amountStr);
-
-        const txnId = payData.transactionId || payData.id || msg.id?.id || null;
-        if (txnId && isDuplicateUTR(txnId)) {
-            await safeSend(msg.from, `⚠️ Ye payment pehle hi register ho chuki hai. Admin se contact karo.`);
+        if (paidAmount === null || paidAmount <= 0) {
+            log('WARN', `WA Pay: Could not parse amount — rawAmount=${rawAmount}, from: ${msg.from}`);
+            const cleanNum = await getRealNumber(msg);
+            await client.sendMessage(adminId,
+                `🚨 *WA PAY — AMOUNT UNREADABLE*\n` +
+                `From: +91${cleanNum} | ID: ${msg.from}\n` +
+                `Raw amount field: ${rawAmount ?? 'N/A'}\n` +
+                `Status: ${rawStatus}\n` +
+                `payData: ${JSON.stringify(payData).slice(0, 400)}\n\n` +
+                `Manual verification required. Reply *ok* to approve or *ban* to deny.`
+            );
+            await safeSend(msg.from, `✅ Payment mila! Amount verify nahi hua. Admin check karega.\nThoda wait karo. 🙏`);
             return true;
         }
 
-        const activeLobbies = MODE_LOBBIES[activeMode] || [];
+        // ── LAYER 8: Duplicate transaction ID check ───────────────────
+        const txnId =
+            payData.transactionId  ||
+            payData.txnId          ||
+            payData.referenceId    ||
+            payData.id             ||
+            msg.id?.id             ||
+            null;
+
+        if (txnId && isDuplicateUTR(txnId)) {
+            log('WARN', `WA Pay: Duplicate txnId blocked — ${txnId} from ${msg.from}`);
+            await safeSend(msg.from, `⚠️ Ye payment already registered hai. Admin se contact karo.`);
+            return true;
+        }
+
+        // ── Match amount to active lobby prices ───────────────────────
+        const validPrices   = getValidPrices();
+        const amountStr     = String(paidAmount);
+        const amountMatches = validPrices.includes(amountStr);
+
+        const activeLobbies  = MODE_LOBBIES[activeMode] || [];
         const extractNumbers = (str) => (String(str).match(/\d+/g) || []);
         const priceDetect = [
             { prices: extractNumbers(settings.miniPrice),        lobby: 'Mini'        },
@@ -661,18 +771,54 @@ const handleWhatsAppPay = async (msg) => {
             { prices: extractNumbers(settings.duoPrice),         lobby: 'Duo'         },
         ];
 
-        let detectedLobby = null;
+        const matchedLobbies = [];
         if (amountMatches) {
             for (const pd of priceDetect) {
-                if (pd.prices.includes(amountStr) && activeLobbies.map(l => l.toLowerCase()).includes(pd.lobby.toLowerCase())) {
-                    detectedLobby = pd.lobby;
-                    break;
+                if (
+                    pd.prices.includes(amountStr) &&
+                    activeLobbies.map(l => l.toLowerCase()).includes(pd.lobby.toLowerCase())
+                ) {
+                    matchedLobbies.push(pd.lobby);
                 }
             }
         }
 
-        const cleanNumber = await getRealNumber(msg);
+        let detectedLobby = null;
+        let isAmbiguous   = false;
+        if (matchedLobbies.length === 1)      detectedLobby = matchedLobbies[0];
+        else if (matchedLobbies.length > 1)   isAmbiguous   = true;
 
+        const cleanNumber = await getRealNumber(msg);
+        log('INFO', `WA Pay OK — From: +91${cleanNumber}, ₹${paidAmount}, TxnID: ${txnId || 'N/A'}, Status: ${rawStatus}, Matched: [${matchedLobbies.join(',')}]`);
+
+        // ── CASE A: Amount ambiguous — 2+ lobbies match ───────────────
+        if (isAmbiguous) {
+            touchActive(msg.from);
+            clearQrReminder(msg.from);
+            await saveSession(msg.from, {
+                mediaPath: null,
+                status:    '✅ WA-PAY VERIFIED',
+                isAuto:    true,
+                utr:       txnId || 'WA_PAY',
+                amount:    amountStr,
+                imgHash:   `WAPAY_${txnId || Date.now()}`,
+                state:     'AWAITING_LOBBY',
+                lobbyType: null
+            });
+            let choiceMsg  = `✅ *WhatsApp Pay Received!* ₹${paidAmount}\n`;
+            choiceMsg += `🔒 Payment verified!\n━━━━━━━━━━━━━━━━━━━━\n`;
+            choiceMsg += `⚠️ Tera amount *${matchedLobbies.length} lobbies* ke price se match karta hai.\n\n`;
+            choiceMsg += `Konsi lobby leni hai? Type karo:\n\n`;
+            matchedLobbies.forEach((l, i) => {
+                const meta = getLobbyMeta(l);
+                choiceMsg += `${meta.emoji} *${i + 1}. ${l.toUpperCase()}* — ${meta.matches} Matches @ ₹${meta.price}\n`;
+            });
+            choiceMsg += `\n👉 Lobby ka naam type karo (e.g. *${matchedLobbies[0]}*)`;
+            await safeSend(msg.from, choiceMsg);
+            return true;
+        }
+
+        // ── CASE B: Exactly one lobby matched — auto-proceed ─────────
         if (amountMatches && detectedLobby) {
             touchActive(msg.from);
             clearQrReminder(msg.from);
@@ -686,23 +832,58 @@ const handleWhatsAppPay = async (msg) => {
                 state:     'AWAITING_TEAM_NAME',
                 lobbyType: detectedLobby
             });
-            await safeSend(msg.from, `✅ *WhatsApp Pay Received!*\n💰 Amount : *₹${paidAmount}*\n🎮 Lobby  : *${detectedLobby}*\n🔒 Status : *Verified* ✅\n━━━━━━━━━━━━━━━━━━━━\n👉 Ab apna *Team Name* bhejo aur registration complete karo:`);
-        } else if (paidAmount !== null && !amountMatches) {
-            const adminId = client.info.wid.user + '@c.us';
-            // ✅ Yahan se bhi '+' hata diya gaya hai
-            await client.sendMessage(adminId, `🚨 *WA PAY — AMOUNT MISMATCH*\nFrom: 91${cleanNumber} | ID: ${msg.from}\nPaid: ₹${paidAmount}\nValid prices: ₹${validPrices.join(', ₹')}\nTxnID: ${txnId || 'N/A'}\n\nReply *ok* to manually approve or *ban* to deny.`);
-            await safeSend(msg.from, `⚠️ *Payment Mila!* ₹${paidAmount}\nLekin ye amount kisi bhi lobby ke price se match nahi karta.\n\nValid prices:\n` + activeLobbies.map(l => { const m = getLobbyMeta(l); return `${m.emoji} ${l}: ₹${m.price}`; }).join('\n') + `\n\nAdmin check karega. Wait karo. 🙏`);
-        } else {
-            const adminId = client.info.wid.user + '@c.us';
-            // ✅ Yahan se bhi '+' hata diya gaya hai
-            await client.sendMessage(adminId, `🚨 *WA PAY — MANUAL CHECK*\nFrom: 91${cleanNumber} | ID: ${msg.from}\nAmount extracted: ${paidAmount ?? 'N/A'}\nTxnID: ${txnId || 'N/A'}\nRaw payData: ${JSON.stringify(payData).slice(0, 300)}\n\nReply *ok* to approve or *ban* to deny.`);
-            await safeSend(msg.from, `✅ Payment receive hua! Admin verify kar raha hai.\nThoda wait karo. 🙏`);
+            await safeSend(msg.from,
+                `✅ *WhatsApp Pay Received!*\n` +
+                `💰 Amount : *₹${paidAmount}*\n` +
+                `🎮 Lobby  : *${detectedLobby}*\n` +
+                `🔒 Status : *Verified* ✅\n` +
+                `━━━━━━━━━━━━━━━━━━━━\n` +
+                `👉 Ab apna *Team Name* bhejo aur registration complete karo:`
+            );
+            await client.sendMessage(adminId,
+                `✅ *WA PAY AUTO-VERIFIED*\n` +
+                `From: +91${cleanNumber} | ${msg.from}\n` +
+                `Amount: ₹${paidAmount} | Lobby: ${detectedLobby}\n` +
+                `TxnID: ${txnId || 'N/A'}\n\n` +
+                `Reply *ban* to revoke if needed.`
+            );
+            return true;
         }
-        return true; 
+
+        // ── CASE C: Amount doesn't match any lobby price ──────────────
+        if (paidAmount !== null && !amountMatches) {
+            await client.sendMessage(adminId,
+                `🚨 *WA PAY — AMOUNT MISMATCH*\n` +
+                `From: +91${cleanNumber} | ${msg.from}\n` +
+                `Paid: ₹${paidAmount}\n` +
+                `Valid prices: ₹${validPrices.join(', ₹')}\n` +
+                `TxnID: ${txnId || 'N/A'}\n\n` +
+                `Reply *ok* to manually approve or *ban* to deny.`
+            );
+            await safeSend(msg.from,
+                `⚠️ *Payment Mila! ₹${paidAmount}*\n\n` +
+                `Ye amount kisi bhi lobby ke price se match nahi karta.\n\n` +
+                `Valid prices:\n` +
+                activeLobbies.map(l => { const m = getLobbyMeta(l); return `${m.emoji} ${l}: ₹${m.price}`; }).join('\n') +
+                `\n\nAdmin check karega. Wait karo. 🙏`
+            );
+            return true;
+        }
+
+        return true;
+
     } catch (e) {
+        log('ERROR', `handleWhatsAppPay error: ${e.message}\n${e.stack}`);
+        try {
+            const adminId = client.info.wid.user + '@c.us';
+            await client.sendMessage(adminId,
+                `🔴 *WA PAY HANDLER CRASH*\nFrom: ${msg.from}\nError: ${e.message}\n\nManual check karo.`
+            );
+        } catch (_) {}
         return false;
     }
 };
+
 
 client.on('qr',          qr     => { qrcode.generate(qr, { small: true }); });
 client.on('ready',       ()     => log('INFO', '✅ BOT READY! EXPANDED KEYWORDS + ANTI-BAN LOADED.'));
@@ -722,9 +903,15 @@ client.on('message_create', async msg => {
         if (msg.from.includes('@g.us') || msg.to.includes('@g.us')) return;
         if (msg.isStatus) return;
 
+        // ── WHATSAPP NATIVE PAY INTERCEPTION ────────────
+        // Checked FIRST, before any text/media logic.
+        // handleWhatsAppPay returns true if msg was a payment object
+        // (pass or fail) — in that case we stop here and never fall
+        // through to the OCR / text handler below.
+        // Only real msg.type === 'payment' objects pass this gate.
         if (msg.type === 'payment') {
             await handleWhatsAppPay(msg);
-            return; 
+            return; // fully handled — do NOT continue to text/image logic
         }
 
         const rawText   = msg.body.trim();
@@ -735,8 +922,10 @@ client.on('message_create', async msg => {
         const isAdmin = msg.fromMe || msg.from === adminId || msg.from === client.info.wid._serialized;
 
         if (msg.fromMe && !rawText.startsWith('.') && !['ok', 'ban'].includes(textLower)) return;
+
         if (isAdmin) { await handleAdminMessage(msg, rawText, textLower, cmd); return; }
 
+        // ── Activity Filter ──────────────────────────
         touchActive(msg.from);
         if (!isUserActive(msg.from)) return;
 
@@ -757,6 +946,7 @@ client.on('message_create', async msg => {
 const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
     const replyAdmin = (text) => client.sendMessage(msg.from, text);
 
+    // ── Broadcast ───────────────────────────────────
     if (cmd === '.broadcast' || cmd === '.bc') {
         const parts = rawText.split(/\s+/);
         const targetLobby = parts[1]?.toLowerCase();
@@ -780,6 +970,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         return replyAdmin(`✅ Broadcast sent to ${ok}/${targets.length} teams.`);
     }
 
+    // ── Settings ────────────────────────────────────
     if (cmd === '.setname' || cmd === '.settitle') {
         const newName = rawText.slice(cmd.length).trim();
         if (newName) { settings.scrimName = newName; saveSettings(); return replyAdmin(`✅ Scrim name: *${newName}*`); }
@@ -792,6 +983,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         return replyAdmin('⚠️ Usage: .setlobbytime 9 PM');
     }
 
+    // ── Price ───────────────────────────────────────
     if (cmd === '.setprice') {
         const parts = rawText.split(/\s+/);
         const type = parts[1]?.toLowerCase();
@@ -805,6 +997,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         return replyAdmin('⚠️ Usage: .setprice mini/mega/live/medium/competitive/custom/solo/duo <amount>');
     }
 
+    // ── Match count ─────────────────────────────────
     if (cmd === '.setmatches') {
         const parts = rawText.split(/\s+/);
         const type = parts[1]?.toLowerCase();
@@ -818,6 +1011,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         return replyAdmin('⚠️ Usage: .setmatches mini/mega/live/medium/competitive/custom <count>');
     }
 
+    // ── Links ───────────────────────────────────────
     if (cmd === '.setlink') {
         const parts = rawText.split(/\s+/);
         const type = parts[1]?.toLowerCase();
@@ -831,6 +1025,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         return replyAdmin('⚠️ Usage: .setlink mini/mega/live/medium/competitive/custom/solo/duo <link>');
     }
 
+    // ── Mode ────────────────────────────────────────
     if (cmd === '.setmode' || cmd === '.setmodelive') {
         let val = cmd === '.setmodelive' ? 'minilive' : rawText.split(/\s+/)[1]?.toLowerCase();
         const validModes = Object.keys(MODE_LOBBIES);
@@ -841,6 +1036,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         return replyAdmin(`✅ *Mode: ${val.toUpperCase()}*\nActive lobbies: ${activeList}`);
     }
 
+    // ── Slot open/close ─────────────────────────────
     if (cmd === '.setfull') {
         const type = rawText.split(/\s+/)[1]?.toLowerCase();
         if (!type) return replyAdmin('⚠️ Usage: .setfull mini/mega/live/medium/competitive/custom/solo/duo');
@@ -857,12 +1053,14 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         return replyAdmin(`✅ *${type.toUpperCase()} Lobby* is now OPEN.`);
     }
 
+    // ── Slot count ──────────────────────────────────
     if (cmd === '.setslots') {
         const n = parseInt(rawText.split(/\s+/)[1]);
         if (!isNaN(n) && n > 0) { maxSlots = n; return replyAdmin(`✅ Max slots per lobby: *${n}*`); }
         return replyAdmin('⚠️ Usage: .setslots <number>');
     }
 
+    // ── Activity window control ─────────────────────
     if (cmd === '.setwindow') {
         const secs = parseInt(rawText.split(/\s+/)[1]);
         if (!isNaN(secs) && secs >= 5) {
@@ -876,6 +1074,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         return replyAdmin(`⏱️ *Activity Window:* ${ACTIVE_WINDOW/1000} seconds\n\nBot sirf unhe reply karta hai jo last ${ACTIVE_WINDOW/1000}s me message kiya ho.\nChange karne ke liye: .setwindow <seconds>`);
     }
 
+    // ── List / Stats / Clear ────────────────────────
     if (cmd === '.list') {
         const records = readRecords();
         if (!records.length) return replyAdmin('📋 No registrations yet.');
@@ -892,6 +1091,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
     }
 
     if (cmd === '.listdetail' || cmd === '.listd') {
+        // Detailed list with numbers and UTR
         const records = readRecords();
         if (!records.length) return replyAdmin('📋 No registrations yet.');
         let out = `📋 *DETAILED SLOTLIST*\n\n`;
@@ -908,6 +1108,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
 
     if (cmd === '.stats') {
         const s = getStats();
+        const modes = Object.keys(MODE_LOBBIES).join(' | ');
         let out = `📊 *BOT STATS*\n━━━━━━━━━━━━━━━\n`;
         out += `Scrim Name  : ${settings.scrimName}\n`;
         out += `Total       : ${s.total}\n`;
@@ -934,6 +1135,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         return replyAdmin('🧹 All registrations + memory cleared.');
     }
 
+    // NEW: Remove a specific team by name
     if (cmd === '.remove') {
         const parts = rawText.split(/\s+/);
         const lobbyType = parts[1]?.toLowerCase();
@@ -948,15 +1150,17 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         return replyAdmin(removed > 0 ? `✅ Removed *${teamNameToRemove}* from ${lobbyType.toUpperCase()}.` : `⚠️ Team not found.`);
     }
 
+    // NEW: Ban a number from registering
     if (cmd === '.ban' && !msg.hasQuotedMsg) {
         const number = rawText.split(/\s+/)[1]?.replace(/\D/g, '');
         if (!number) return replyAdmin('⚠️ Usage: .ban <number> — to ban from quoted msg, reply with "ban"');
         removeRecord(number);
         completedUsers.delete(`${number}@c.us`);
         seenUsers.delete(`${number}@c.us`);
-        return replyAdmin(`🚫 Number ${number} banned and record removed.`); // ✅ '+' hata diya
+        return replyAdmin(`🚫 Number +${number} banned and record removed.`);
     }
 
+    // NEW: Reset a specific user's session (unstick them)
     if (cmd === '.reset') {
         const number = rawText.split(/\s+/)[1]?.replace(/\D/g, '');
         if (!number) return replyAdmin('⚠️ Usage: .reset <number>');
@@ -965,9 +1169,10 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         completedUsers.delete(userId);
         seenUsers.delete(userId);
         if (userQueues[userId]) userQueues[userId] = [];
-        return replyAdmin(`✅ Session reset for ${number}. They can start fresh.`); // ✅ '+' hata diya
+        return replyAdmin(`✅ Session reset for +${number}. They can start fresh.`);
     }
 
+    // NEW: Send QR manually to a number
     if (cmd === '.sendqr') {
         const number = rawText.split(/\s+/)[1]?.replace(/\D/g, '');
         if (!number) return replyAdmin('⚠️ Usage: .sendqr <number>');
@@ -975,10 +1180,11 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         if (!fs.existsSync('./qr.png')) return replyAdmin('⚠️ qr.png not found.');
         try {
             await client.sendMessage(userId, MessageMedia.fromFilePath('./qr.png'), { caption: `📲 *MAG ESPORTS* — Scan & Pay, then send screenshot.` });
-            return replyAdmin(`✅ QR sent to ${number}`); // ✅ '+' hata diya
+            return replyAdmin(`✅ QR sent to +${number}`);
         } catch(e) { return replyAdmin(`❌ Failed: ${e.message}`); }
     }
 
+    // NEW: Show current prices
     if (cmd === '.prices') {
         return replyAdmin(
             `💰 *CURRENT PRICES*\n━━━━━━━━━━━━━━━\n` +
@@ -994,6 +1200,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         );
     }
 
+    // NEW: Show available modes
     if (cmd === '.modes') {
         let out = `🎮 *AVAILABLE MODES*\n━━━━━━━━━━━━━━━\n`;
         for (const [m, lobbies] of Object.entries(MODE_LOBBIES)) {
@@ -1002,6 +1209,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         return replyAdmin(out);
     }
 
+    // NEW: Show current links
     if (cmd === '.links') {
         return replyAdmin(
             `🔗 *CURRENT LINKS*\n━━━━━━━━━━━━━━━\n` +
@@ -1009,6 +1217,7 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         );
     }
 
+    // NEW: Admin help command
     if (cmd === '.help') {
         return replyAdmin(
             `🤖 *ADMIN COMMANDS*\n━━━━━━━━━━━━━━━━━\n\n` +
@@ -1023,28 +1232,51 @@ const handleAdminMessage = async (msg, rawText, textLower, cmd) => {
         );
     }
 
+    // ── Approval (reply to flagged payment) ─────────
     if (msg.hasQuotedMsg && (textLower === 'ok' || textLower === 'ban')) {
         const body = (await msg.getQuotedMessage()).body || '';
-        let targetId = (body.match(/ID:\s*(\S+)/) || [])[1];
-        const cleanNumber = (body.match(/Number:\s*\+?(\d+)/) || [])[1] || (targetId ? targetId.split('@')[0] : null);
-        if (cleanNumber && (!targetId || targetId.includes('@lid'))) targetId = `${cleanNumber}@c.us`;
-        if (targetId) {
-            const teamName  = (body.match(/Team:\s*\*?([^\n*]+)\*?/) || [])[1]?.trim() || 'Unknown';
-            const lobbyType = (body.match(/Lobby:\s*\*?([^\n*]+)\*?/i) || [])[1]?.trim() || 'Mini';
-            if (textLower === 'ok') {
-                saveRecord(teamName, cleanNumber, lobbyType, 'N/A', 'N/A', 'MANUAL_OK');
-                const link = links[lobbyType.toLowerCase()] || links.mini;
+
+        // Extract ID field (WhatsApp chat ID)
+        let targetId = (body.match(/ID:\s*(\S+@\S+)/) || [])[1] || null;
+
+        // Extract number — handles: "+91XXXXXXXXXX", "91XXXXXXXXXX", "+XXXXXXXXXX", "XXXXXXXXXX"
+        const numMatch = body.match(/Number:\s*\+?91?(\d{10})/);
+        const cleanNumber = numMatch?.[1] || null;
+
+        // Build targetId from number if not found or is @lid format
+        if (cleanNumber && (!targetId || targetId.includes('@lid'))) {
+            targetId = `91${cleanNumber}@c.us`;
+        }
+
+        if (!targetId || !cleanNumber) {
+            return replyAdmin(`⚠️ Number/ID extract nahi hua quoted message se.\nBody preview: ${body.slice(0, 100)}`);
+        }
+
+        const teamName  = (body.match(/Team:\s*\*?([^\n*]+)\*?/) || [])[1]?.trim() || 'Unknown';
+        const lobbyType = (body.match(/Lobby:\s*\*?([^\n*]+)\*?/i) || [])[1]?.trim() || 'Mini';
+
+        if (textLower === 'ok') {
+            saveRecord(teamName, cleanNumber, lobbyType, 'N/A', 'N/A', 'MANUAL_OK');
+            const link = links[lobbyType.toLowerCase()] || links.mini;
+            try {
                 await client.sendMessage(targetId, `✅ *VERIFIED BY ADMIN!*\nTeam: *${teamName}*\n🔗 Link: ${link}`);
-                return replyAdmin(`✅ Approved: ${teamName}`);
+            } catch(e) {
+                log('WARN', `ok: could not message ${targetId}: ${e.message}`);
             }
-            if (textLower === 'ban') {
-                if (body.includes('AUTO-VERIFIED')) removeRecord(cleanNumber);
-                completedUsers.delete(targetId);
-                seenUsers.delete(targetId);
-                await clearSession(targetId);
+            return replyAdmin(`✅ Approved: *${teamName}* (${lobbyType})\nNumber: +91${cleanNumber}`);
+        }
+
+        if (textLower === 'ban') {
+            if (body.includes('AUTO-VERIFIED') || body.includes('WA-PAY')) removeRecord(cleanNumber);
+            completedUsers.delete(targetId);
+            seenUsers.delete(targetId);
+            await clearSession(targetId);
+            try {
                 await client.sendMessage(targetId, `🚫 *Payment Rejected!*\nSahi screenshot bhejo ya admin se contact karo.`);
-                return replyAdmin(`🚫 Rejected: ${teamName}`);
+            } catch(e) {
+                log('WARN', `ban: could not message ${targetId}: ${e.message}`);
             }
+            return replyAdmin(`🚫 Rejected: *${teamName}* (${lobbyType})\nNumber: +91${cleanNumber}`);
         }
     }
 };
@@ -1069,9 +1301,11 @@ const handleUserMessage = async (msg, rawText, textLower) => {
         const pData = await TempSession.findOne({ phone: msg.from });
         const isWaitingText = pData?.state === 'AWAITING_LOBBY' || pData?.state === 'AWAITING_TEAM_NAME';
 
+        // Lobby keyword detection (filtered to only active mode lobbies)
         const detectedKeyword = detectLobby(textLower);
         let wantsLobby = (detectedKeyword && lobbyInMode(detectedKeyword)) ? detectedKeyword : null;
 
+        // Numeric shortcuts: 1=first active, 2=second, 3=third ... up to 8
         const activeLobbies = MODE_LOBBIES[activeMode] || [];
         if (!wantsLobby && textLower === '1' && activeLobbies[0]) wantsLobby = activeLobbies[0];
         if (!wantsLobby && textLower === '2' && activeLobbies[1]) wantsLobby = activeLobbies[1];
@@ -1082,40 +1316,32 @@ const handleUserMessage = async (msg, rawText, textLower) => {
         if (!wantsLobby && textLower === '7' && activeLobbies[6]) wantsLobby = activeLobbies[6];
         if (!wantsLobby && textLower === '8' && activeLobbies[7]) wantsLobby = activeLobbies[7];
 
-        if (!wantsLobby && !isWaitingText) {
-            const extractedNumbers = textLower.match(/\d+/g) || [];
-            const matchesByPrice = [];
-
-            for (const lobbyName of activeLobbies) {
-                const meta = getLobbyMeta(lobbyName);
-                const lobbyPriceStr = String(meta.price);
-                if (extractedNumbers.includes(lobbyPriceStr)) {
-                    matchesByPrice.push(lobbyName);
+        // Price-number detection — map amount back to lobby type
+        if (!wantsLobby) {
+            const priceDetect = [
+                { prices: miniPrices,        lobby: 'Mini',        mode: ['all','both','mini','minilive','minimedium','minimediumcomp','minimediumlive'] },
+                { prices: megaPrices,        lobby: 'Mega',        mode: ['all','both','mega','megacomp','megamediumcomp'] },
+                { prices: livePrices,        lobby: 'Live',        mode: ['all','live','minilive','minimediumlive'] },
+                { prices: mediumPrices,      lobby: 'Medium',      mode: ['all','medium','minimedium','minimediumcomp','minimediumlive','megamediumcomp','full'] },
+                { prices: competitivePrices, lobby: 'Competitive', mode: ['all','competitive','megacomp','minimediumcomp','megamediumcomp','full'] },
+                { prices: customPrices,      lobby: 'Custom',      mode: ['all','custom','full'] },
+                { prices: soloPrices,        lobby: 'Solo',        mode: ['all','solo','solodup','full'] },
+                { prices: duoPrices,         lobby: 'Duo',         mode: ['all','duo','solodup','full'] },
+            ];
+            for (const pd of priceDetect) {
+                if (textHasNumber(pd.prices, textLower) && pd.mode.includes(activeMode)) {
+                    wantsLobby = pd.lobby; break;
                 }
-            }
-
-            if (matchesByPrice.length === 1) {
-                wantsLobby = matchesByPrice[0];
-            } else if (matchesByPrice.length > 1) {
-                await TempSession.updateOne(
-                    { phone: msg.from },
-                    { state: 'AWAITING_LOBBY', priceMatches: matchesByPrice },
-                    { upsert: true }
-                );
-                return safeSend(msg.from,
-                    `⚠️ *Multiple lobbies have price ₹${extractedNumbers[0]}!*\n\n` +
-                    `Which one do you want?\n` +
-                    matchesByPrice.map((lb, i) => `${i+1}. ${lb}`).join('\n') +
-                    `\nJust type the number or name.`
-                );
             }
         }
 
+        // ── Expanded QR/pay keyword detection ───────
         const asksQR = /qr|scan|pay|upi|kese|kaise|bhejo|number|send|chahiye|chaiye|chyie|chayie|barcode|bar\s*code|scanner|gpay|g\s*pay|paytm|phonepe|phone\s*pe|bhejna|fee|price|amount|entry|kitna|kitne|rupay|rupee|paise|payment|join|kaise\s*karu|kya\s*kare|how|kaise\s*le|lena\s*hai|book\s*karna|register\s*karna|slot\s*chahiye/i.test(textLower);
 
         const isPriceNumber = textHasNumber(allPrices, textLower);
         const hasDirectIntent = !!wantsLobby || asksQR || isPriceNumber;
 
+        // ── Welcome for first-time users ─────────────
         if (!seenUsers.has(msg.from) && !msg.hasMedia) {
             seenUsers.add(msg.from);
             if (!isWaitingText && !hasDirectIntent) {
@@ -1123,6 +1349,7 @@ const handleUserMessage = async (msg, rawText, textLower) => {
             }
         }
 
+        // ── State machine ────────────────────────────
         if (pData && !msg.hasMedia) {
             if (pData.state === 'AWAITING_LOBBY') {
                 if (!wantsLobby) return safeSend(msg.from, `⚠️ Sahi lobby select karo.\n\nOptions: *${activeLobbies.join('*, *')}*`);
@@ -1131,21 +1358,21 @@ const handleUserMessage = async (msg, rawText, textLower) => {
             }
 
             if (pData.state === 'AWAITING_TEAM_NAME') {
-                if (isInvalidName(rawText)) return safeSend(msg.from, '⚠️ Ek proper *Team Name* bhejo.');
-                if (isDuplicateTeam(rawText, pData.lobbyType)) return safeSend(msg.from, `⚠️ *${rawText}* pehle se *${pData.lobbyType} Lobby* mein registered hai!`);
+                if (isInvalidName(rawText)) return safeSend(msg.from, '⚠️ Ek proper *Team Name* bhejo.\n(Team name sirf alphabets mein hona chahiye)');
+                if (isDuplicateTeam(rawText, pData.lobbyType)) return safeSend(msg.from, `⚠️ *${rawText}* pehle se *${pData.lobbyType} Lobby* mein registered hai!\nKoi doosra naam bhejo:`);
                 if (!isSlotsAvailable(pData.lobbyType)) {
                     await clearSession(msg.from);
                     return safeSend(msg.from, `🛑 *${pData.lobbyType} lobby full ho gayi hai!*`);
                 }
-                
                 clearQrReminder(msg.from);
                 completedUsers.add(msg.from);
-                await processVerification(msg, rawText, pData.lobbyType, pData); 
+                await processVerification(msg, rawText, pData.lobbyType, pData);
                 await clearSession(msg.from);
                 return;
             }
         }
 
+        // ── Image / screenshot ───────────────────────
         if (msg.hasMedia && msg.type === 'image') {
             clearQrReminder(msg.from);
             const media = await msg.downloadMedia();
@@ -1174,14 +1401,15 @@ const handleUserMessage = async (msg, rawText, textLower) => {
                     resultObj.isAuto = false;
                 }
 
+                // Detect lobby from payment amount
                 let detectedLobby = null;
                 if (amount) {
                     const priceDetect = [
-                        { prices: miniPrices,        lobby: 'Mini',        mode: ['all','both','mini','minilive','minimedium'] },
-                        { prices: megaPrices,        lobby: 'Mega',        mode: ['all','both','mega','megacomp'] },
-                        { prices: livePrices,        lobby: 'Live',        mode: ['all','live','minilive'] },
-                        { prices: mediumPrices,      lobby: 'Medium',      mode: ['all','medium','minimedium','full'] },
-                        { prices: competitivePrices, lobby: 'Competitive', mode: ['all','competitive','megacomp','full'] },
+                        { prices: miniPrices,        lobby: 'Mini',        mode: ['all','both','mini','minilive','minimedium','minimediumcomp','minimediumlive'] },
+                        { prices: megaPrices,        lobby: 'Mega',        mode: ['all','both','mega','megacomp','megamediumcomp'] },
+                        { prices: livePrices,        lobby: 'Live',        mode: ['all','live','minilive','minimediumlive'] },
+                        { prices: mediumPrices,      lobby: 'Medium',      mode: ['all','medium','minimedium','minimediumcomp','minimediumlive','megamediumcomp','full'] },
+                        { prices: competitivePrices, lobby: 'Competitive', mode: ['all','competitive','megacomp','minimediumcomp','megamediumcomp','full'] },
                         { prices: customPrices,      lobby: 'Custom',      mode: ['all','custom','full'] },
                         { prices: soloPrices,        lobby: 'Solo',        mode: ['all','solo','solodup','full'] },
                         { prices: duoPrices,         lobby: 'Duo',         mode: ['all','duo','solodup','full'] },
@@ -1218,6 +1446,7 @@ const handleUserMessage = async (msg, rawText, textLower) => {
             }
         }
 
+        // ── Text intent ──────────────────────────────
         if (!msg.hasMedia && !isWaitingText && rawText.length > 0) {
             if (hasDirectIntent) {
                 if (completedUsers.has(msg.from) && !wantsLobby && !asksQR) return;
@@ -1228,6 +1457,7 @@ const handleUserMessage = async (msg, rawText, textLower) => {
                     if (!isSlotsAvailable(wantsLobby)) return safeSend(msg.from, `😔 *${wantsLobby} lobby full ho gayi hai!*`);
                     return await sendLobbyInfo(msg.from, wantsLobby);
                 } else {
+                    // Generic QR request — show QR with all active lobby prices
                     if (fs.existsSync('./qr.png')) {
                         let captionText = `👇 *SCAN & PAY*\n⏰ *Lobby Time:* ${settings.lobbyTime}\n\n`;
                         for (const lobbyName of activeLobbies) {
@@ -1245,6 +1475,7 @@ const handleUserMessage = async (msg, rawText, textLower) => {
                 }
             }
 
+            // ── Welcome triggers ─────────────────────
             const welcomeRegex = /\b(hi|hello|hey|hii|helo|helo|menu|book|slot|slots|register|tourney|tournament|scrim|\?|help|details|info|join|start|kya\s*hai|kaise|bhai|bro|hy|sup|hlo|hlw|lena\s*hai|chahiye)\b/i;
             if (welcomeRegex.test(textLower) && !completedUsers.has(msg.from)) {
                 return safeSend(msg.from, getWelcomeMessage());
@@ -1256,6 +1487,9 @@ const handleUserMessage = async (msg, rawText, textLower) => {
     }
 };
 
+// ─────────────────────────────────────────────────────
+//  CRON — daily reset at midnight IST
+// ─────────────────────────────────────────────────────
 cron.schedule('0 0 * * *', async () => {
     localRecords = [];
     try { await DailyRecord.deleteMany({}); } catch (e) {}
@@ -1270,6 +1504,7 @@ cron.schedule('0 0 * * *', async () => {
     completedUsers.clear();
     Object.keys(userQueues).forEach(k => { userQueues[k] = []; });
     processingSet.clear();
+    // Clear activity tracker so previous day's users don't carry over
     Object.keys(lastActiveMap).forEach(k => { delete lastActiveMap[k]; });
     log('INFO', '🧹 Daily reset completed.');
 }, { timezone: 'Asia/Kolkata' });
